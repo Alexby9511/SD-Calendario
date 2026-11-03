@@ -4,7 +4,8 @@ Sistema de calendario compartido orientado a la coordinación entre múltiples
 usuarios, con soporte para desconexión temporal, edición concurrente, distintos
 niveles de privacidad y desacuerdos en la aceptación de reuniones.
 
-> **Estado del proyecto:** fase de diseño. Aún no hay código ni stack decidido.
+> **Estado del proyecto:** diseño v3 congelado, implementación del hito 1 en
+> curso. Ver [`docs/arquitectura.md`](docs/arquitectura.md).
 
 ## Motivación
 
@@ -100,27 +101,94 @@ diseño pendiente.
 
 ## Stack
 
-**Pendiente de decisión.** Candidatos según las convenciones del entorno:
+**Go en las dos puntas.**
 
-- Flutter/Dart (escritorio + móvil)
-- Rust (backend/servicio)
-- Python (prototipo/servicio)
+| Capa | Tecnología |
+| --- | --- |
+| Servidor | Go + [`hashicorp/raft`](https://github.com/hashicorp/raft) + `raft-boltdb/v2` |
+| Cliente | Go (store SQLite, outbox, firma) + [Wails v3](https://wails.io) |
+| Protocolo | `pkg/protocol/`: sobre, JCS ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)), Ed25519 |
+| Persistencia cliente | SQLite (`modernc.org/sqlite`, sin cgo) |
+| Verificación | `anishathalye/porcupine` (linealizabilidad) |
+
+El motivo es que el protocolo se implementa **una sola vez**: `pkg/protocol/` lo
+importan el nodo y el cliente, así que la firma y la serialización canónica no
+pueden divergir entre lenguajes.
+
+Requisitos:
+
+| Parte | Requisito |
+| --- | --- |
+| Servidor | Go 1.22+ |
+| Cliente | Go 1.24+ (Wails v3), Node 22 para compilar el frontend |
+| Cliente en Linux | `libwebkit2gtk-4.1-dev` |
 
 ## Estructura del repositorio
-
-Sin definir hasta elegir stack. Previsto:
 
 ```text
 .
 ├── README.md
-├── docs/          # diseño, decisiones y diagramas
-└── (código)       # según stack elegido
+├── go.mod                    # módulo raíz: servidor + protocolo
+├── docs/
+│   └── arquitectura.md       # diseño v3 (fuente de verdad)
+├── pkg/
+│   └── protocol/             # sobre, JCS, Ed25519 — compartido
+├── server/
+│   ├── cmd/sdcald/           # binario del nodo
+│   └── internal/
+│       ├── raftnode/         # hashicorp/raft + boltdb
+│       ├── fsm/              # máquina de estados replicada
+│       └── api/              # HTTP, reenvío al líder
+├── client/                   # app Wails (ver client/README.md)
+└── deploy/
+    ├── Dockerfile            # build multi-etapa
+    ├── Dockerfile.runtime    # con binario precompilado
+    ├── docker-compose.yml    # 3 nodos
+    └── demo.sh               # demo de pérdida de líder
+```
+
+## Cómo ejecutarlo
+
+```bash
+# Tests: protocolo, FSM y un clúster de 3 nodos en memoria que pierde al líder
+go test ./...
+
+# Nodo suelto en local
+go run ./server/cmd/sdcald -id=n1 -raft-advertise=127.0.0.1:7000 \
+  -http-advertise=127.0.0.1:8080 -bootstrap \
+  -peers=n1@127.0.0.1:7000@127.0.0.1:8080
+
+# Clúster de 3 nodos + demo de fallo del líder
+./deploy/demo.sh
+```
+
+Si el daemon de Docker no puede bajar `golang:1.22-alpine`, la demo compila el
+binario en local y usa una imagen mínima:
+
+```bash
+SDCAL_DOCKERFILE=deploy/Dockerfile.runtime ./deploy/demo.sh
+```
+
+Salida esperada de la demo:
+
+```text
+==> matando al líder (n2)
+==> esperando un líder nuevo con 2 de 3 nodos
+  8081 -> demo=despues-del-fallo  {"id":"n1","state":"Leader","applied_index":9}
+  8082 -> caído
+  8083 -> demo=despues-del-fallo  {"id":"n3","state":"Follower","applied_index":9}
 ```
 
 ## Próximos pasos
 
-1. Decidir stack y arquitectura (cliente único vs. cliente + servidor).
-2. Definir el modelo de datos del evento y sus estados.
-3. Especificar la política de privacidad y la de confirmación de reuniones.
-4. Diseñar el protocolo de sincronización y reconciliación offline.
-5. Implementar el núcleo de eventos personales como primer vertical slice.
+1. ~~Decidir stack~~ → Go + Wails.
+2. ~~Hito 1: 3 nodos Raft, FSM de eco, reenvío al líder y pérdida del líder.~~
+3. Hito 2: FSM v1 (`REQUEST`/`REPLY`) con dedupe y el test `replay ≡ snapshot`.
+4. Hito 3: vectores dorados de JCS y Ed25519.
+5. Hito 4: cliente Wails con calendario personal y outbox offline.
+6. Hito 5: invitaciones, reglas de confirmación y deadline.
+7. Hito 6: `BUSY_UPDATE` y disponibilidad.
+8. Hito 7: simulador y `porcupine`.
+
+El diseño detallado —modelo de datos, protocolo, invariantes, API y reglas de
+confirmación— está en [`docs/arquitectura.md`](docs/arquitectura.md).
