@@ -14,6 +14,23 @@ const (
 	Unavailable     Code = 503
 )
 
+// IsSuccess reports whether the code means the command was applied.
+func (c Code) IsSuccess() bool { return c == OK }
+
+// HTTPStatus maps the protocol code to the status line used on the wire.
+//
+// Protocol codes are HTTP-shaped on purpose (RFC-style 4xx/5xx that a proxy
+// understands without a translation table); the switch is explicit so adding a
+// code cannot silently produce 200.
+func (c Code) HTTPStatus() int {
+	switch c {
+	case OK, Unauthorized, Forbidden, Conflict, Gone, Unprocessable, TooManyRequests, Unavailable:
+		return int(c)
+	default:
+		return 500
+	}
+}
+
 // IsRetryable reports whether the client should send the same msg_id again.
 func (c Code) IsRetryable() bool { return c == Unavailable || c == TooManyRequests }
 

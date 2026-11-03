@@ -150,7 +150,7 @@ Requisitos:
 ## Cómo ejecutarlo
 
 ```bash
-# Tests: protocolo, FSM y un clúster de 3 nodos en memoria que pierde al líder
+# Tests: protocolo, FSM, API HTTP y un clúster de 3 nodos en memoria
 go test ./...
 
 # Nodo suelto en local

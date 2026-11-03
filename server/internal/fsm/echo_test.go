@@ -3,10 +3,13 @@ package fsm
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 
 	"github.com/hashicorp/raft"
+
+	"github.com/Alexby9511/SD-Calendario/pkg/protocol"
 )
 
 func applyCommands(t *testing.T, e *Echo, cmds ...Command) {
@@ -54,6 +57,47 @@ func TestApplyRejectsUnknownOp(t *testing.T) {
 	res := e.Apply(&raft.Log{Data: raw}).(Result)
 	if res.Err == nil {
 		t.Fatal("unknown op accepted")
+	}
+}
+
+func TestApplyRejectsEmptyKey(t *testing.T) {
+	e := New()
+	raw, _ := json.Marshal(Command{Op: "set", Key: "", Value: "x"})
+	res := e.Apply(&raft.Log{Data: raw}).(Result)
+	if res.Err == nil {
+		t.Fatal("empty key accepted")
+	}
+}
+
+// Admission and apply must agree: whatever Validate rejects cannot be applied
+// either, otherwise a command could slip into the log by another path.
+func TestValidateMatchesApply(t *testing.T) {
+	cases := [][]byte{
+		[]byte(`{"op":"set","key":"a","value":"1"}`),
+		[]byte(`{"op":"delete","key":"a"}`),
+		[]byte(`{"op":"set","key":"","value":"1"}`),
+		[]byte(`{"op":"explode","key":"a"}`),
+		[]byte(`{"op":"set"`),
+		[]byte(`[]`),
+	}
+	for _, raw := range cases {
+		admissionErr := New().Validate(raw)
+		applied := New().Apply(&raft.Log{Data: raw}).(Result).Err
+		if (admissionErr == nil) != (applied == nil) {
+			t.Errorf("input %s: admission err %v, apply err %v", raw, admissionErr, applied)
+		}
+	}
+}
+
+func TestCommandErrorCarriesStatus(t *testing.T) {
+	raw := []byte(`{"op":"explode","key":"a"}`)
+	err := New().Validate(raw)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("want *CommandError, got %T", err)
+	}
+	if cmdErr.StatusCode() != protocol.Unprocessable {
+		t.Fatalf("status = %v, want %v", cmdErr.StatusCode(), protocol.Unprocessable)
 	}
 }
 

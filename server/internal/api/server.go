@@ -16,6 +16,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/Alexby9511/SD-Calendario/pkg/protocol"
 	"github.com/Alexby9511/SD-Calendario/server/internal/raftnode"
 )
 
@@ -25,26 +26,47 @@ const (
 	forwardedByHdr = "X-Sdcal-Forwarded-By"
 )
 
+// Node is the subset of *raftnode.Node the HTTP layer needs. Tests substitute a
+// fake to reach every branch without starting a cluster.
+type Node interface {
+	IsLeader() bool
+	LeaderWithID() (string, string)
+	State() string
+	AppliedIndex() uint64
+	LastIndex() uint64
+	CommitIndex() uint64
+	Apply(data []byte, timeout time.Duration) (uint64, any, error)
+}
+
+// ValidateFunc checks stateless command rules. It runs before the command is
+// proposed, so a malformed command never consumes a raft index and every node
+// (leader or follower) rejects it with the same answer.
+type ValidateFunc func([]byte) error
+
 // Config describes the HTTP layer.
 type Config struct {
-	Node     *raftnode.Node
+	Node     Node
 	NodeID   string
 	HTTPAddr string
 	Peers    []raftnode.Peer
 	// Lookup reads from the local FSM. It is advisory: a follower may be
 	// slightly behind, which the real API will expose as read_index.
 	Lookup func(key string) (string, bool)
-	Logger *slog.Logger
+	// Validate is optional; when nil, admission only checks that the body is
+	// JSON. The calendar FSM always provides one.
+	Validate ValidateFunc
+	Logger   *slog.Logger
 }
 
 // Server serves the node API.
 type Server struct {
-	node   *raftnode.Node
-	self   raftnode.Peer
-	peers  map[string]string // node id -> http address
-	lookup func(string) (string, bool)
-	client *http.Client
-	logger *slog.Logger
+	node     Node
+	self     raftnode.Peer
+	peers    map[string]string // node id -> http address
+	lookup   func(string) (string, bool)
+	validate ValidateFunc
+	client   *http.Client
+	logger   *slog.Logger
 }
 
 // New builds the HTTP server.
@@ -68,12 +90,13 @@ func New(cfg Config) *Server {
 		logger = slog.Default()
 	}
 	return &Server{
-		node:   cfg.Node,
-		self:   self,
-		peers:  peers,
-		lookup: cfg.Lookup,
-		client: &http.Client{Timeout: 10 * time.Second},
-		logger: logger,
+		node:     cfg.Node,
+		self:     self,
+		peers:    peers,
+		lookup:   cfg.Lookup,
+		validate: cfg.Validate,
+		client:   &http.Client{Timeout: 10 * time.Second},
+		logger:   logger,
 	}
 }
 
@@ -128,6 +151,15 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Admission before replication: a command that cannot be applied is
+	// rejected here, on whichever node received it, without a log entry.
+	if s.validate != nil {
+		if err := s.validate(body); err != nil {
+			writeCodedError(w, err)
+			return
+		}
+	}
+
 	if !s.node.IsLeader() {
 		if r.Header.Get(forwardedByHdr) != "" {
 			// Already forwarded once and still not the leader: a loop means
@@ -139,7 +171,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	index, err := s.node.Apply(body, applyTimeout)
+	index, response, err := s.node.Apply(body, applyTimeout)
 	if err != nil {
 		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 			s.forward(w, r, body)
@@ -149,7 +181,30 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "apply failed")
 		return
 	}
+
+	// The entry is committed, but "committed" is not "applied successfully":
+	// the FSM may reject it (state-dependent rules in the calendar FSM). The
+	// client must see that rejection, not a 200.
+	if appliedErr := applyError(response); appliedErr != nil {
+		writeCodedError(w, appliedErr)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, commandResponse{Status: "committed", LogIndex: index})
+}
+
+// applyError extracts the rejection from an FSM response. ApplyError() is used
+// instead of the error interface so that a zero-valued result does not look
+// like a non-nil error.
+func applyError(response any) error {
+	type applyError interface{ ApplyError() error }
+	if result, ok := response.(applyError); ok {
+		return result.ApplyError()
+	}
+	if err, ok := response.(error); ok {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -192,6 +247,10 @@ func (s *Server) handleKV(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "empty key")
 		return
 	}
+	if s.lookup == nil {
+		writeError(w, http.StatusServiceUnavailable, "lookup unavailable")
+		return
+	}
 	value, ok := s.lookup(key)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -202,6 +261,18 @@ func (s *Server) handleKV(w http.ResponseWriter, r *http.Request) {
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+// writeCodedError answers with the status carried by the error. Command
+// rejections implement StatusCode; anything else is a 422 because the only
+// errors that reach here come from admission or from the FSM.
+func writeCodedError(w http.ResponseWriter, err error) {
+	code := protocol.Unprocessable
+	var coded interface{ StatusCode() protocol.Code }
+	if errors.As(err, &coded) {
+		code = coded.StatusCode()
+	}
+	writeError(w, code.HTTPStatus(), err.Error())
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

@@ -100,6 +100,7 @@ func run() error {
 		HTTPAddr: *httpAdvertise,
 		Peers:    peers,
 		Lookup:   machine.Get,
+		Validate: machine.Validate,
 		Logger:   logger,
 	})
 

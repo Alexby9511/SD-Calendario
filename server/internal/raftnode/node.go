@@ -9,11 +9,34 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
+
+// slogWriter adapts a slog.Logger to the io.Writer that parts of hashicorp/raft
+// still ask for, so every line goes through the logger the node was configured
+// with instead of straight to stderr.
+type slogWriter struct{ logger *slog.Logger }
+
+func (w slogWriter) Write(p []byte) (int, error) {
+	w.logger.Warn(strings.TrimSpace(string(p)))
+	return len(p), nil
+}
+
+// newRaftLogger returns the hclog adapter used by raft, its snapshot store and
+// its transport. WARN is the useful level for an operator, which is also why
+// raft's DEBUG default is never used here.
+func newRaftLogger(logger *slog.Logger) hclog.Logger {
+	return hclog.New(&hclog.LoggerOptions{
+		Name:   "raft",
+		Level:  hclog.Warn,
+		Output: slogWriter{logger: logger},
+	})
+}
 
 // Peer is a cluster member. RaftAddr is the address used by the consensus
 // transport; HTTPAddr is used for forwarding writes to the leader.
@@ -67,6 +90,7 @@ func New(cfg Config) (*Node, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	raftLog := newRaftLogger(logger)
 
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("raftnode: data dir: %w", err)
@@ -77,7 +101,7 @@ func New(cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("raftnode: bolt store: %w", err)
 	}
 
-	snapshots, err := raft.NewFileSnapshotStore(cfg.DataDir, 2, os.Stderr)
+	snapshots, err := raft.NewFileSnapshotStoreWithLogger(cfg.DataDir, 2, raftLog)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("raftnode: snapshot store: %w", err)
@@ -95,7 +119,7 @@ func New(cfg Config) (*Node, error) {
 			_ = store.Close()
 			return nil, fmt.Errorf("raftnode: resolve advertise address: %w", err)
 		}
-		tcpTransport, err := raft.NewTCPTransport(cfg.BindAddr, advertise, 5, 10*time.Second, os.Stderr)
+		tcpTransport, err := raft.NewTCPTransportWithLogger(cfg.BindAddr, advertise, 5, 10*time.Second, raftLog)
 		if err != nil {
 			_ = store.Close()
 			return nil, fmt.Errorf("raftnode: transport: %w", err)
@@ -106,9 +130,7 @@ func New(cfg Config) (*Node, error) {
 
 	rc := raft.DefaultConfig()
 	rc.LocalID = raft.ServerID(cfg.ID)
-	// raft's default log level is DEBUG, which floods stderr in tests and in
-	// the demo. Warnings are what an operator needs.
-	rc.LogLevel = "WARN"
+	rc.Logger = raftLog
 	rc.SnapshotInterval = 30 * time.Second
 	rc.SnapshotThreshold = 512
 
@@ -169,13 +191,16 @@ func (n *Node) LastIndex() uint64 { return n.raft.LastIndex() }
 // CommitIndex is the highest log entry known to be committed.
 func (n *Node) CommitIndex() uint64 { return n.raft.CommitIndex() }
 
-// Apply commits data through the leader and waits for the FSM to apply it.
-func (n *Node) Apply(data []byte, timeout time.Duration) (uint64, error) {
+// Apply proposes data through the leader and waits until the FSM has applied
+// it. The value returned by the FSM is passed through unchanged: rejecting a
+// command after it is committed is the FSM's decision, and the HTTP layer needs
+// the reason to answer with the right status instead of a blanket 200.
+func (n *Node) Apply(data []byte, timeout time.Duration) (uint64, any, error) {
 	future := n.raft.Apply(data, timeout)
 	if err := future.Error(); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return future.Index(), nil
+	return future.Index(), future.Response(), nil
 }
 
 // Shutdown stops raft and closes its resources.

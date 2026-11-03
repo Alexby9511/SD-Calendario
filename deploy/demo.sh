@@ -87,6 +87,15 @@ for port in "${PORTS[@]}"; do
   printf '  %s -> %s\n' "$port" "$(read_value "$port" demo)"
 done
 
+log "comando inválido: la admisión lo rechaza sin gastar un índice del log"
+before=$(status "$leader" | jq -r '.applied_index')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$follower/v1/command" \
+  -H 'Content-Type: application/json' \
+  -d '{"op":"explode","key":"x"}')
+after=$(status "$leader" | jq -r '.applied_index')
+printf '  follower %s -> HTTP %s, applied_index %s -> %s\n' "$follower" "$code" "$before" "$after"
+[[ "$code" == "422" && "$before" == "$after" ]] || die "la admisión no rechazó el comando"
+
 leader_id=$(status "$leader" | jq -r '.id')
 log "matando al líder ($leader_id)"
 docker kill "sdcal-$leader_id" >/dev/null

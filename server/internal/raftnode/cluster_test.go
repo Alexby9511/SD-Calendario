@@ -2,6 +2,8 @@ package raftnode_test
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/Alexby9511/SD-Calendario/pkg/protocol"
 	"github.com/Alexby9511/SD-Calendario/server/internal/fsm"
 	"github.com/Alexby9511/SD-Calendario/server/internal/raftnode"
 )
@@ -81,6 +84,49 @@ func TestClusterSurvivesLeaderLoss(t *testing.T) {
 	waitForValue(t, machines, "b", "2", 5*time.Second)
 }
 
+// TestApplyReturnsFSMRejection covers the link between the FSM and the HTTP
+// layer: raft commits the entry, so the only way to tell the client it was
+// rejected is to return the FSM's response instead of discarding it.
+func TestApplyReturnsFSMRejection(t *testing.T) {
+	_, tr := raft.NewInmemTransport(raft.ServerAddress("solo"))
+	machine := fsm.New()
+	node, err := raftnode.New(raftnode.Config{
+		ID:        "solo",
+		RaftAddr:  "solo",
+		DataDir:   t.TempDir(),
+		Bootstrap: true,
+		Peers:     []raftnode.Peer{{ID: "solo", RaftAddr: "solo", HTTPAddr: "solo:8080"}},
+		FSM:       machine,
+		Transport: tr,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = node.Shutdown() })
+
+	waitForLeader(t, map[string]*raftnode.Node{"solo": node}, 10*time.Second)
+
+	index, response, err := node.Apply([]byte(`{"op":"explode","key":"a"}`), 5*time.Second)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if index == 0 {
+		t.Fatal("apply returned index 0")
+	}
+	result, ok := response.(fsm.Result)
+	if !ok {
+		t.Fatalf("response = %T, want fsm.Result", response)
+	}
+	var cmdErr *fsm.CommandError
+	if !errors.As(result.Err, &cmdErr) {
+		t.Fatalf("error = %v, want *fsm.CommandError", result.Err)
+	}
+	if cmdErr.StatusCode() != protocol.Unprocessable {
+		t.Fatalf("status = %v", cmdErr.StatusCode())
+	}
+}
+
 func waitForLeader(t *testing.T, nodes map[string]*raftnode.Node, timeout time.Duration) (string, *raftnode.Node) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -102,12 +148,15 @@ func applySet(t *testing.T, node *raftnode.Node, key, value string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	index, err := node.Apply(raw, 5*time.Second)
+	index, response, err := node.Apply(raw, 5*time.Second)
 	if err != nil {
 		t.Fatalf("apply %s=%s: %v", key, value, err)
 	}
 	if index == 0 {
 		t.Fatal("apply returned log index 0")
+	}
+	if result, ok := response.(fsm.Result); ok && result.Err != nil {
+		t.Fatalf("apply %s=%s rejected by the FSM: %v", key, value, result.Err)
 	}
 }
 

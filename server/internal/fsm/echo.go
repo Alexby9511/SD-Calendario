@@ -13,6 +13,8 @@ import (
 	"sync"
 
 	"github.com/hashicorp/raft"
+
+	"github.com/Alexby9511/SD-Calendario/pkg/protocol"
 )
 
 // Command is the JSON payload accepted by Echo.
@@ -20,6 +22,51 @@ type Command struct {
 	Op    string `json:"op"`
 	Key   string `json:"key"`
 	Value string `json:"value,omitempty"`
+}
+
+// CommandError is a rejection caused by the command itself, as opposed to an
+// infrastructure failure. It carries the protocol code so the HTTP layer can
+// answer 422/409/... without importing the FSM.
+type CommandError struct {
+	Code   protocol.Code
+	Reason string
+}
+
+func (e *CommandError) Error() string { return e.Reason }
+
+// StatusCode implements the interface read by the API layer.
+func (e *CommandError) StatusCode() protocol.Code { return e.Code }
+
+func invalid(format string, args ...any) error {
+	return &CommandError{Code: protocol.Unprocessable, Reason: fmt.Sprintf(format, args...)}
+}
+
+// DecodeCommand parses and validates a command body.
+//
+// This is the single definition of what a valid command is: admission calls it
+// before proposing to the log, and Apply calls it again as the authoritative
+// check. Sharing the function is what keeps the two from drifting apart.
+func DecodeCommand(data []byte) (Command, error) {
+	var cmd Command
+	if err := json.Unmarshal(data, &cmd); err != nil {
+		return Command{}, invalid("decode command: %v", err)
+	}
+	if err := cmd.validate(); err != nil {
+		return Command{}, err
+	}
+	return cmd, nil
+}
+
+func (c Command) validate() error {
+	if c.Key == "" {
+		return invalid("empty key")
+	}
+	switch c.Op {
+	case "set", "delete":
+	default:
+		return invalid("unknown op %q", c.Op)
+	}
+	return nil
 }
 
 // Echo is a deterministic map guarded by a mutex. raft serializes Apply calls,
@@ -34,18 +81,22 @@ func New() *Echo {
 	return &Echo{data: make(map[string]string)}
 }
 
-// Apply implements raft.FSM.
-func (e *Echo) Apply(log *raft.Log) any {
-	var cmd Command
-	if err := json.Unmarshal(log.Data, &cmd); err != nil {
-		return Result{Err: fmt.Errorf("decode command: %w", err)}
-	}
-	return Result{Err: e.apply(cmd)}
+// Validate checks a command without executing it. The HTTP layer runs it before
+// the command reaches raft, so a malformed command never consumes a log index.
+func (e *Echo) Validate(data []byte) error {
+	_, err := DecodeCommand(data)
+	return err
 }
 
-func (e *Echo) apply(cmd Command) error {
-	if cmd.Key == "" {
-		return fmt.Errorf("empty key")
+// Apply implements raft.FSM.
+func (e *Echo) Apply(log *raft.Log) any {
+	return Result{Err: e.apply(log.Data)}
+}
+
+func (e *Echo) apply(data []byte) error {
+	cmd, err := DecodeCommand(data)
+	if err != nil {
+		return err
 	}
 	switch cmd.Op {
 	case "set":
@@ -57,7 +108,9 @@ func (e *Echo) apply(cmd Command) error {
 		defer e.mu.Unlock()
 		delete(e.data, cmd.Key)
 	default:
-		return fmt.Errorf("unknown op %q", cmd.Op)
+		// Unreachable: DecodeCommand rejects unknown ops. Kept so adding an
+		// op to the switch cannot silently fall through.
+		return invalid("unknown op %q", cmd.Op)
 	}
 	return nil
 }
@@ -107,12 +160,10 @@ type Result struct {
 	Err error
 }
 
-func (r Result) Error() string {
-	if r.Err == nil {
-		return ""
-	}
-	return r.Err.Error()
-}
+// ApplyError exposes the outcome through a method instead of making Result
+// implement error: an error interface holding a Result with Err == nil would be
+// non-nil and look like a failure.
+func (r Result) ApplyError() error { return r.Err }
 
 type snapshot struct {
 	data map[string]string
