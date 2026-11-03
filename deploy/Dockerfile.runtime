@@ -1,0 +1,17 @@
+# Runtime-only image: expects ./sdcald already built at the repository root.
+#
+#   CGO_ENABLED=0 go build -o sdcald ./server/cmd/sdcald
+#   SDCAL_DOCKERFILE=deploy/Dockerfile.runtime docker compose -f deploy/docker-compose.yml up -d
+#
+# Useful when the Docker daemon cannot pull the golang builder image.
+FROM alpine:latest
+
+RUN adduser -D -u 10001 sdcal && mkdir -p /data && chown sdcal /data
+
+COPY sdcald /usr/local/bin/sdcald
+
+USER sdcal
+VOLUME ["/data"]
+EXPOSE 7000 8080
+
+ENTRYPOINT ["/usr/local/bin/sdcald"]

@@ -1,0 +1,19 @@
+# Build output
+/sdcald
+/bin/
+*.exe
+
+# Go
+/data/
+*.test
+coverage.out
+
+# Node / Wails frontend
+node_modules/
+client/frontend/dist/
+client/build/bin/
+
+# Local runtime state
+*.db
+*.db-shm
+*.db-wal

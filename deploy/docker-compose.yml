@@ -1,0 +1,74 @@
+name: sdcal
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: ${SDCAL_DOCKERFILE:-deploy/Dockerfile}
+  restart: unless-stopped
+  networks:
+    - sdcal
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/v1/status"]
+    interval: 5s
+    timeout: 3s
+    retries: 5
+    start_period: 5s
+
+services:
+  n1:
+    <<: *node
+    container_name: sdcal-n1
+    command:
+      - -id=n1
+      - -raft-bind=0.0.0.0:7000
+      - -raft-advertise=n1:7000
+      - -http-bind=0.0.0.0:8080
+      - -http-advertise=n1:8080
+      - -data=/data
+      - -bootstrap
+      - -peers=n1@n1:7000@n1:8080,n2@n2:7000@n2:8080,n3@n3:7000@n3:8080
+    ports:
+      - "8081:8080"
+    volumes:
+      - n1-data:/data
+
+  n2:
+    <<: *node
+    container_name: sdcal-n2
+    command:
+      - -id=n2
+      - -raft-bind=0.0.0.0:7000
+      - -raft-advertise=n2:7000
+      - -http-bind=0.0.0.0:8080
+      - -http-advertise=n2:8080
+      - -data=/data
+      - -peers=n1@n1:7000@n1:8080,n2@n2:7000@n2:8080,n3@n3:7000@n3:8080
+    ports:
+      - "8082:8080"
+    volumes:
+      - n2-data:/data
+
+  n3:
+    <<: *node
+    container_name: sdcal-n3
+    command:
+      - -id=n3
+      - -raft-bind=0.0.0.0:7000
+      - -raft-advertise=n3:7000
+      - -http-bind=0.0.0.0:8080
+      - -http-advertise=n3:8080
+      - -data=/data
+      - -peers=n1@n1:7000@n1:8080,n2@n2:7000@n2:8080,n3@n3:7000@n3:8080
+    ports:
+      - "8083:8080"
+    volumes:
+      - n3-data:/data
+
+networks:
+  sdcal:
+    driver: bridge
+
+volumes:
+  n1-data:
+  n2-data:
+  n3-data:
