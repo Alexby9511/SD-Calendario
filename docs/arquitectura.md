@@ -10,7 +10,11 @@ Documento de diseño del calendario distribuido y planificador de grupos.
 
 > **Estado:** diseño congelado. A partir de aquí las dudas se resuelven en código
 > y tests, no en otra ronda de revisión.
-> **Decisión pendiente:** consenso propio vs. librería (depende de la rúbrica, §17).
+> **Consenso:** `hashicorp/raft` + `raft-boltdb/v2` (§17).
+>
+> **Registro de cambios:** 2026-11-03 — §6.1 fija el formato exacto de los
+> bytes firmados (JCS del objeto de campos). Hash de la versión anterior:
+> `405cf20a212e1ba19310049cb6927461d79de04c`.
 
 ---
 
@@ -318,9 +322,23 @@ signature        Ed25519
 payload          campos del tipo
 ```
 
-**Bytes firmados** (serialización canónica):
-`deployment_id | group_id | msg_id | type | uid | sender_id | key_id |
-sequence | seen_sequence | client_sent_at | canonical(payload)`.
+**Bytes firmados.** No es una concatenación con separadores: es el **JCS
+(RFC 8785) del objeto** cuyos campos son exactamente los de la lista anterior,
+sin `signature`.
+
+```json
+{"client_sent_at":"…","deployment_id":"…","group_id":"…","key_id":"…",
+ "msg_id":"…","payload":{…},"seen_sequence":0,"sender_id":"…",
+ "sequence":1,"type":"REQUEST","uid":"…"}
+```
+
+`payload` se canonicaliza como **objeto** (no como string) antes de insertarse.
+JCS ordena las claves, así que el orden textual de arriba no importa; lo que
+queda fijado son los nombres, que todos los campos están siempre presentes
+(incluidos los cero) y que los números son enteros. Los vectores dorados viven
+en `pkg/protocol/envelope_test.go`
+(`TestSigningInputGoldenVector` y `TestSignatureGoldenVector`): fijan los bytes
+exactos y la firma de una semilla conocida, y fallan si el formato cambia.
 
 `deployment_id` y `group_id` cierran el replay cruzado entre despliegues y entre
 grupos. `key_id` va **dentro** de la firma para impedir sustitución de clave.
