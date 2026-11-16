@@ -11,10 +11,12 @@ Calendario distribuido académico: servidor Go con Raft (`hashicorp/raft`) + cli
 ## Comandos
 
 ```bash
-go test ./...            # todo: protocolo, FSM y clúster de 3 nodos
+go test ./...            # todo: protocolo, FSM, API HTTP y clúster de 3 nodos
 go test ./pkg/protocol/ -run TestIsULID   # un test concreto
 ./deploy/demo.sh         # clúster 3 nodos en Docker (8081-8083) + fallo del líder
 ```
+
+- El toolchain no está en PATH en esta máquina: `export PATH="$HOME/.local/go-root/usr/lib/go-1.22/bin:$PATH"` (Go 1.22 extraído de un .deb de apt; el cliente Wails necesitará el tarball 1.24+ aparte).
 
 - El módulo raíz (`go.mod` en la raíz) cubre solo `pkg/` + `server/`. El import path es `github.com/Alexby9511/SD-Calendario` (sin espacio, con mayúsculas), distinto del nombre del directorio.
 - El test de clúster (`server/internal/raftnode/cluster_test.go`) usa transports en memoria: sin puertos ni Docker, pero tarda (~timeout de elección).
@@ -25,6 +27,7 @@ go test ./pkg/protocol/ -run TestIsULID   # un test concreto
 - La API actual (hito 1) es `/v1/command` (singular), `/v1/kv/{key}` y `/v1/status` con una FSM de eco; **no** coincide todavía con la del diseño (`/v1/commands`, etc.). Ante conflicto diseño vs. código durante hito 1, el código es lo que se ejecuta.
 - Cliente propone por cualquier nodo y el follower reenvía al líder interno (`server/internal/api`), con lookup local **advisory** (un follower puede ir por detrás).
 - `pkg/protocol/` (sobre, JCS RFC 8785, Ed25519) lo importarán ambos binarios: nunca duplicar firma/serialización canónica en el cliente.
+- El formato de los bytes firmados está **fijado por vectores dorados** (`TestSigningInputGoldenVector` / `TestSignatureGoldenVector`): si cambian algo del sobre o del orden de campos, esos tests fallan; no "arreglarlos" para que pasen sin discutir el §6.1.
 
 ## Convenciones
 
