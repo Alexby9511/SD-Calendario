@@ -1,3 +1,5 @@
+// cluster_test.go exercises Raft election, commitment, and FSM replay.
+// It uses in-memory transports to verify leader loss and rejection handling.
 package raftnode_test
 
 import (
@@ -87,6 +89,7 @@ func TestClusterSurvivesLeaderLoss(t *testing.T) {
 // TestApplyReturnsFSMRejection covers the link between the FSM and the HTTP
 // layer: raft commits the entry, so the only way to tell the client it was
 // rejected is to return the FSM's response instead of discarding it.
+// TestApplyReturnsFSMRejection verifies Raft apply exposes FSM command errors.
 func TestApplyReturnsFSMRejection(t *testing.T) {
 	_, tr := raft.NewInmemTransport(raft.ServerAddress("solo"))
 	machine := fsm.New()
@@ -127,6 +130,7 @@ func TestApplyReturnsFSMRejection(t *testing.T) {
 	}
 }
 
+// waitForLeader waits until one cluster node has become leader.
 func waitForLeader(t *testing.T, nodes map[string]*raftnode.Node, timeout time.Duration) (string, *raftnode.Node) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -142,6 +146,7 @@ func waitForLeader(t *testing.T, nodes map[string]*raftnode.Node, timeout time.D
 	return "", nil
 }
 
+// applySet commits a set command to the Raft node.
 func applySet(t *testing.T, node *raftnode.Node, key, value string) {
 	t.Helper()
 	raw, err := json.Marshal(fsm.Command{Op: "set", Key: key, Value: value})
@@ -162,6 +167,7 @@ func applySet(t *testing.T, node *raftnode.Node, key, value string) {
 
 // waitForValue waits until every node has applied the write. This is what
 // distinguishes "the leader accepted it" from "the cluster converged".
+// waitForValue waits until all test FSM replicas contain the expected value.
 func waitForValue(t *testing.T, machines map[string]*fsm.Echo, key, want string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

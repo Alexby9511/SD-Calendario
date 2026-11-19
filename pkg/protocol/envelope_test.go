@@ -1,3 +1,5 @@
+// envelope_test.go verifies envelope signing and validation behavior.
+// Golden vectors protect the fixed signed-byte format from accidental changes.
 package protocol
 
 import (
@@ -21,6 +23,7 @@ const goldenSigningInput = `{"client_sent_at":"2026-11-02T09:12:03Z","deployment
 // RFC 8032) must reproduce it byte for byte.
 const goldenSignature = "38e000721736435aeca6279045aee359f8c5f2e299cfde90b5a352ffd8cbb8cb0812b8430db69386b733ea7968f31b783bcee4f8a9619acbe73c11ba510bc70a"
 
+// newEnvelope creates a valid test envelope for signing and validation tests.
 func newEnvelope(t *testing.T) *Envelope {
 	t.Helper()
 	return &Envelope{
@@ -69,6 +72,7 @@ func TestSignatureGoldenVector(t *testing.T) {
 	}
 }
 
+// TestSignVerifyRoundTrip verifies signing and verification with a valid key pair.
 func TestSignVerifyRoundTrip(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -84,6 +88,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	}
 }
 
+// TestVerifyDetectsTampering verifies modified payload bytes invalidate the signature.
 func TestVerifyDetectsTampering(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -101,6 +106,7 @@ func TestVerifyDetectsTampering(t *testing.T) {
 	}
 }
 
+// TestSigningInputIgnoresSignatureAndFormatting verifies signatures and JSON formatting do not affect signing bytes.
 func TestSigningInputIgnoresSignatureAndFormatting(t *testing.T) {
 	// Same logical payload, different key order and whitespace.
 	envA := newEnvelope(t)
@@ -139,6 +145,7 @@ func TestSigningInputIgnoresSignatureAndFormatting(t *testing.T) {
 	}
 }
 
+// TestMessageHashExcludesSignature verifies changing only the signature leaves the digest unchanged.
 func TestMessageHashExcludesSignature(t *testing.T) {
 	env := newEnvelope(t)
 	before, err := env.MessageHash()
@@ -155,6 +162,7 @@ func TestMessageHashExcludesSignature(t *testing.T) {
 	}
 }
 
+// TestValidateCreationNamespace verifies creation UIDs must belong to the sender namespace.
 func TestValidateCreationNamespace(t *testing.T) {
 	env := newEnvelope(t)
 	if err := env.Validate(); err != nil {
@@ -167,6 +175,7 @@ func TestValidateCreationNamespace(t *testing.T) {
 	}
 }
 
+// TestValidateAllowsUpdatesOutsideNamespaceCheck verifies namespace rules apply only to first sequence.
 func TestValidateAllowsUpdatesOutsideNamespaceCheck(t *testing.T) {
 	env := newEnvelope(t)
 	env.Sequence = 2
@@ -176,6 +185,7 @@ func TestValidateAllowsUpdatesOutsideNamespaceCheck(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsMissingFields verifies required envelope fields cannot be empty.
 func TestValidateRejectsMissingFields(t *testing.T) {
 	env := newEnvelope(t)
 	env.MsgID = ""
@@ -184,6 +194,7 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 	}
 }
 
+// TestSignRejectsSystemCommands verifies system commands cannot be signed by clients.
 func TestSignRejectsSystemCommands(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

@@ -1,3 +1,5 @@
+// cluster_test.go exercises HTTP commands across an in-memory three-node cluster.
+// It verifies follower forwarding, leader commitment, and cluster admission.
 package api_test
 
 import (
@@ -31,6 +33,7 @@ type testCluster struct {
 	nodes []*clusterNode
 }
 
+// startCluster starts a real in-memory Raft and HTTP cluster for testing.
 func startCluster(t *testing.T, size int) *testCluster {
 	t.Helper()
 
@@ -110,6 +113,7 @@ func startCluster(t *testing.T, size int) *testCluster {
 	return cluster
 }
 
+// waitLeader waits until the test cluster elects a leader.
 func (c *testCluster) waitLeader(t *testing.T, timeout time.Duration) *clusterNode {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -125,6 +129,7 @@ func (c *testCluster) waitLeader(t *testing.T, timeout time.Duration) *clusterNo
 	return nil
 }
 
+// follower returns the first node that is not the given leader.
 func (c *testCluster) follower(leader *clusterNode) *clusterNode {
 	for _, n := range c.nodes {
 		if n.id != leader.id {
@@ -134,6 +139,7 @@ func (c *testCluster) follower(leader *clusterNode) *clusterNode {
 	return nil
 }
 
+// waitValue waits until every cluster FSM has applied the requested value.
 func (c *testCluster) waitValue(t *testing.T, key, want string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -157,6 +163,7 @@ func (c *testCluster) waitValue(t *testing.T, key, want string, timeout time.Dur
 	t.Fatalf("not every node converged on %s=%s", key, want)
 }
 
+// appliedIndex reads the applied log index reported by one cluster node.
 func (c *testCluster) appliedIndex(t *testing.T, n *clusterNode) uint64 {
 	t.Helper()
 	resp, err := http.Get(n.url + "/v1/status")
@@ -173,6 +180,7 @@ func (c *testCluster) appliedIndex(t *testing.T, n *clusterNode) uint64 {
 	return body.AppliedIndex
 }
 
+// TestClusterCommitsThroughFollower verifies follower writes reach the leader and converge.
 func TestClusterCommitsThroughFollower(t *testing.T) {
 	cluster := startCluster(t, 2)
 	leader := cluster.waitLeader(t, 10*time.Second)
@@ -203,6 +211,7 @@ func TestClusterCommitsThroughFollower(t *testing.T) {
 
 // H1 end to end: admission rejects the command on the follower that received
 // it, so no raft entry is created anywhere.
+// TestClusterAdmissionConsumesNoLogEntry verifies invalid follower writes do not enter the Raft log.
 func TestClusterAdmissionConsumesNoLogEntry(t *testing.T) {
 	cluster := startCluster(t, 2)
 	leader := cluster.waitLeader(t, 10*time.Second)

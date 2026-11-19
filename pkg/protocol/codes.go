@@ -1,3 +1,5 @@
+// codes.go maps protocol result codes to HTTP behavior and client actions.
+// It centralizes success, retry, refresh, and discard semantics.
 package protocol
 
 // Code is the response status defined in docs/arquitectura.md §6.4.

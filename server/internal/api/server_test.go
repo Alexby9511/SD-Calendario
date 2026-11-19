@@ -1,3 +1,5 @@
+// server_test.go verifies the HTTP API against fake and in-memory nodes.
+// It covers admission, forwarding, status, and key/value read behavior.
 package api_test
 
 import (
@@ -41,10 +43,13 @@ type fakeNode struct {
 	lastBody      []byte
 }
 
+// IsLeader reports whether the fake node is marked as leader.
 func (f *fakeNode) IsLeader() bool { return f.leader }
 
+// LeaderWithID returns the fake leader address and ID.
 func (f *fakeNode) LeaderWithID() (string, string) { return f.leaderAddr, f.leaderID }
 
+// State returns the configured fake Raft role.
 func (f *fakeNode) State() string {
 	if f.state == "" {
 		return "Follower"
@@ -52,10 +57,14 @@ func (f *fakeNode) State() string {
 	return f.state
 }
 
+// AppliedIndex returns the fake applied index.
 func (f *fakeNode) AppliedIndex() uint64 { return f.appliedIndex }
-func (f *fakeNode) LastIndex() uint64    { return f.lastIndex }
-func (f *fakeNode) CommitIndex() uint64  { return f.commitIndex }
+// LastIndex returns the fake last log index.
+func (f *fakeNode) LastIndex() uint64 { return f.lastIndex }
+// CommitIndex returns the fake committed log index.
+func (f *fakeNode) CommitIndex() uint64 { return f.commitIndex }
 
+// Apply records a command and returns the configured test result.
 func (f *fakeNode) Apply(data []byte, _ time.Duration) (uint64, any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -64,16 +73,19 @@ func (f *fakeNode) Apply(data []byte, _ time.Duration) (uint64, any, error) {
 	return f.applyIndex, f.applyResponse, f.applyErr
 }
 
+// calls returns the number of commands applied to the fake node.
 func (f *fakeNode) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.applyCalls
 }
 
+// quietLogger creates a logger that discards test output.
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// newServer creates an HTTP test server around the supplied node.
 func newServer(node api.Node, peers []raftnode.Peer, validate api.ValidateFunc) *httptest.Server {
 	srv := api.New(api.Config{
 		Node:     node,
@@ -86,6 +98,7 @@ func newServer(node api.Node, peers []raftnode.Peer, validate api.ValidateFunc) 
 	return httptest.NewServer(srv.Handler())
 }
 
+// postCommand sends a JSON command to the test API.
 func postCommand(t *testing.T, url, body string) *http.Response {
 	t.Helper()
 	resp, err := http.Post(url+"/v1/command", "application/json", strings.NewReader(body))
@@ -96,6 +109,7 @@ func postCommand(t *testing.T, url, body string) *http.Response {
 	return resp
 }
 
+// decodeError reads and returns the API error message from a response.
 func decodeError(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	var body struct {
@@ -107,6 +121,7 @@ func decodeError(t *testing.T, resp *http.Response) string {
 	return body.Error
 }
 
+// TestCommandRejectsInvalidJSONWithoutApplying verifies malformed JSON reaches neither validation nor Raft.
 func TestCommandRejectsInvalidJSONWithoutApplying(t *testing.T) {
 	node := &fakeNode{leader: true}
 	srv := newServer(node, nil, (&fakeMachine{}).Validate)
@@ -121,6 +136,7 @@ func TestCommandRejectsInvalidJSONWithoutApplying(t *testing.T) {
 	}
 }
 
+// TestCommandRejectsOversizedBody verifies requests beyond the body limit are rejected.
 func TestCommandRejectsOversizedBody(t *testing.T) {
 	node := &fakeNode{leader: true}
 	srv := newServer(node, nil, nil)
@@ -136,6 +152,7 @@ func TestCommandRejectsOversizedBody(t *testing.T) {
 }
 
 // Admission is the half of H1 that keeps invalid commands out of the log.
+// TestAdmissionRejectsBeforeApply verifies invalid domain commands consume no Raft index.
 func TestAdmissionRejectsBeforeApply(t *testing.T) {
 	node := &fakeNode{leader: true}
 	srv := newServer(node, nil, fsm.New().Validate)
@@ -155,6 +172,7 @@ func TestAdmissionRejectsBeforeApply(t *testing.T) {
 
 // H1 regression: a rejection returned by the FSM used to be discarded, so the
 // client saw 200 committed for a command that was never applied.
+// TestCommandPropagatesFSMRejection verifies FSM rejection codes reach the HTTP caller.
 func TestCommandPropagatesFSMRejection(t *testing.T) {
 	node := &fakeNode{
 		leader:        true,
@@ -172,6 +190,7 @@ func TestCommandPropagatesFSMRejection(t *testing.T) {
 	}
 }
 
+// TestCommandSuccessReportsLogIndex verifies successful commits expose their Raft index.
 func TestCommandSuccessReportsLogIndex(t *testing.T) {
 	node := &fakeNode{leader: true, applyIndex: 42, applyResponse: fsm.Result{}}
 	srv := newServer(node, nil, nil)
@@ -193,6 +212,7 @@ func TestCommandSuccessReportsLogIndex(t *testing.T) {
 	}
 }
 
+// TestFollowerForwardsToLeader verifies follower writes are forwarded with loop-protection headers.
 func TestFollowerForwardsToLeader(t *testing.T) {
 	var (
 		mu      sync.Mutex
@@ -236,6 +256,7 @@ func TestFollowerForwardsToLeader(t *testing.T) {
 }
 
 // A follower rejects malformed commands itself instead of forwarding garbage.
+// TestFollowerRejectsInvalidCommandWithoutForwarding verifies invalid writes stay on the receiving follower.
 func TestFollowerRejectsInvalidCommandWithoutForwarding(t *testing.T) {
 	var forwarded bool
 	leader := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -260,6 +281,7 @@ func TestFollowerRejectsInvalidCommandWithoutForwarding(t *testing.T) {
 	}
 }
 
+// TestForwardLoopGuard verifies already-forwarded requests stop instead of looping.
 func TestForwardLoopGuard(t *testing.T) {
 	node := &fakeNode{leader: false, leaderID: "n1", leaderAddr: "10.0.0.1:7000"}
 	srv := newServer(node, []raftnode.Peer{{ID: "n1", HTTPAddr: "127.0.0.1:1"}}, nil)
@@ -284,6 +306,7 @@ func TestForwardLoopGuard(t *testing.T) {
 	}
 }
 
+// TestForwardUnknownLeader verifies a missing leader peer produces a service-unavailable response.
 func TestForwardUnknownLeader(t *testing.T) {
 	node := &fakeNode{leader: false, leaderID: "n9", leaderAddr: "10.0.0.9:7000"}
 	srv := newServer(node, []raftnode.Peer{{ID: "n1", HTTPAddr: "127.0.0.1:1"}}, nil)
@@ -298,6 +321,7 @@ func TestForwardUnknownLeader(t *testing.T) {
 	}
 }
 
+// TestForwardNoLeader verifies writes fail clearly while Raft has no known leader.
 func TestForwardNoLeader(t *testing.T) {
 	node := &fakeNode{leader: false}
 	srv := newServer(node, nil, nil)
@@ -314,6 +338,7 @@ func TestForwardNoLeader(t *testing.T) {
 
 // The leader can be lost between IsLeader() and Apply(); raft reports it and
 // the request must be retried against the new leader, not failed with 503.
+// TestLeadershipLostWhileApplyingForwards verifies leadership loss retries through the leader.
 func TestLeadershipLostWhileApplyingForwards(t *testing.T) {
 	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -340,6 +365,7 @@ func TestLeadershipLostWhileApplyingForwards(t *testing.T) {
 	}
 }
 
+// TestStatusReportsClusterView verifies status exposes node, leader, and Raft index state.
 func TestStatusReportsClusterView(t *testing.T) {
 	node := &fakeNode{
 		leader:       true,
@@ -371,6 +397,7 @@ func TestStatusReportsClusterView(t *testing.T) {
 	}
 }
 
+// TestKV verifies existing and missing key lookups return the expected HTTP responses.
 func TestKV(t *testing.T) {
 	values := map[string]string{"a": "1"}
 	srv := api.New(api.Config{
@@ -409,4 +436,5 @@ func TestKV(t *testing.T) {
 // that admission ran.
 type fakeMachine struct{}
 
+// Validate accepts any test payload without applying domain rules.
 func (fakeMachine) Validate([]byte) error { return nil }

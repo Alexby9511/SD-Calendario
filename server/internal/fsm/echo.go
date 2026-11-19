@@ -32,11 +32,13 @@ type CommandError struct {
 	Reason string
 }
 
+// Error returns the human-readable command rejection reason.
 func (e *CommandError) Error() string { return e.Reason }
 
 // StatusCode implements the interface read by the API layer.
 func (e *CommandError) StatusCode() protocol.Code { return e.Code }
 
+// invalid creates a protocol-level command validation rejection.
 func invalid(format string, args ...any) error {
 	return &CommandError{Code: protocol.Unprocessable, Reason: fmt.Sprintf(format, args...)}
 }
@@ -57,6 +59,7 @@ func DecodeCommand(data []byte) (Command, error) {
 	return cmd, nil
 }
 
+// validate checks command fields before it is admitted or applied.
 func (c Command) validate() error {
 	if c.Key == "" {
 		return invalid("empty key")
@@ -169,6 +172,7 @@ type snapshot struct {
 	data map[string]string
 }
 
+// Persist writes the snapshot data to the Raft snapshot sink.
 func (s *snapshot) Persist(sink raft.SnapshotSink) error {
 	encoded, err := json.Marshal(s.data)
 	if err != nil {
@@ -182,4 +186,5 @@ func (s *snapshot) Persist(sink raft.SnapshotSink) error {
 	return sink.Close()
 }
 
+// Release frees resources associated with the snapshot.
 func (s *snapshot) Release() {}

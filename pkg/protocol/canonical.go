@@ -1,3 +1,5 @@
+// canonical.go implements canonical JSON encoding and ULID validation.
+// It keeps signature bytes stable across JSON field ordering and formatting.
 package protocol
 
 import (
@@ -44,4 +46,5 @@ func IsULID(s string) bool {
 	return true
 }
 
+// sha256Sum returns the SHA-256 digest of b.
 func sha256Sum(b []byte) [32]byte { return sha256.Sum256(b) }

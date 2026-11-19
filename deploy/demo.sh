@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Hito 1: tres nodos Raft, escritura reenviada al líder y pérdida del líder.
+# Demo script for the three-node Raft cluster.
+# It exercises follower forwarding and leader-loss recovery.
 #
 #   ./deploy/demo.sh
 #
@@ -14,11 +15,13 @@ COMPOSE=(docker compose -f "$ROOT/deploy/docker-compose.yml")
 PORTS=(8081 8082 8083)
 GO="${GO:-go}"
 
-log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; } # Print a demo progress message.
+die() { printf 'error: %s\n' "$*" >&2; exit 1; } # Print an error and stop the demo.
 
+# status fetches the Raft status from one demo node.
 status() { curl -fsS --max-time 2 "http://localhost:$1/v1/status"; }
 
+# leader_port finds the HTTP port of the current Raft leader.
 leader_port() {
   local port
   for port in "${PORTS[@]}"; do
@@ -30,6 +33,7 @@ leader_port() {
   return 1
 }
 
+# wait_leader waits until the demo cluster elects a leader.
 wait_leader() {
   local timeout=${1:-90} start=$SECONDS
   while (( SECONDS - start < timeout )); do
@@ -41,6 +45,7 @@ wait_leader() {
   die "no leader after ${timeout}s"
 }
 
+# apply_set submits a key/value command through one HTTP node.
 apply_set() {
   local port=$1 key=$2 value=$3
   curl -fsS --max-time 10 -X POST "http://localhost:$port/v1/command" \
@@ -48,6 +53,7 @@ apply_set() {
     -d "{\"op\":\"set\",\"key\":\"$key\",\"value\":\"$value\"}"
 }
 
+# read_value reads a key from the local HTTP node.
 read_value() {
   curl -fsS --max-time 5 "http://localhost:$1/v1/kv/$2" | jq -r '.value'
 }
@@ -57,6 +63,7 @@ if [[ -n "${SDCAL_DOCKERFILE:-}" ]]; then
   (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux "$GO" build -trimpath -o "$ROOT/sdcald" ./server/cmd/sdcald)
 fi
 
+# cleanup stops the demo containers and removes the local binary.
 cleanup() {
   "${COMPOSE[@]}" down >/dev/null 2>&1 || true
   rm -f "$ROOT/sdcald"

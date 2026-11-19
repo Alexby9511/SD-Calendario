@@ -1,3 +1,5 @@
+// sdcald starts one SD Calendario Raft node and its HTTP server.
+// It parses cluster arguments, wires the FSM, and shuts down on termination.
 // Command sdcald runs one node of the SD Calendario cluster.
 package main
 
@@ -21,6 +23,7 @@ import (
 
 type peersFlag []raftnode.Peer
 
+// String formats the peer list as a readable comma-separated string.
 func (p *peersFlag) String() string {
 	parts := make([]string, 0, len(*p))
 	for _, peer := range *p {
@@ -29,6 +32,7 @@ func (p *peersFlag) String() string {
 	return strings.Join(parts, ",")
 }
 
+// Set parses comma-separated peer addresses into the peer list.
 func (p *peersFlag) Set(value string) error {
 	for _, item := range strings.Split(value, ",") {
 		item = strings.TrimSpace(item)
@@ -44,6 +48,7 @@ func (p *peersFlag) Set(value string) error {
 	return nil
 }
 
+// main reports startup failures and exits with a non-zero status.
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "sdcald: %v\n", err)
@@ -51,6 +56,7 @@ func main() {
 	}
 }
 
+// run parses configuration, starts the node and server, then shuts them down.
 func run() error {
 	var (
 		id            = flag.String("id", "", "node id: n1, n2 or n3")

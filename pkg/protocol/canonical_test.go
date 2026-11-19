@@ -1,7 +1,10 @@
+// canonical_test.go verifies canonical JSON and ULID behavior.
+// It covers key sorting, whitespace, idempotence, and invalid input.
 package protocol
 
 import "testing"
 
+// TestCanonicalizeSortsKeysAndDropsWhitespace verifies JCS key and whitespace normalization.
 func TestCanonicalizeSortsKeysAndDropsWhitespace(t *testing.T) {
 	in := []byte(`{ "b": 2, "a": [ 3, { "z": 1, "y": 2 } ] }`)
 	got, err := Canonicalize(in)
@@ -14,6 +17,7 @@ func TestCanonicalizeSortsKeysAndDropsWhitespace(t *testing.T) {
 	}
 }
 
+// TestCanonicalizeIsIdempotent verifies repeated canonicalization does not change bytes.
 func TestCanonicalizeIsIdempotent(t *testing.T) {
 	in := []byte(`{"a":1,"b":"x"}`)
 	once, err := Canonicalize(in)
@@ -29,12 +33,14 @@ func TestCanonicalizeIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestCanonicalizeRejectsInvalidJSON verifies malformed JSON is rejected.
 func TestCanonicalizeRejectsInvalidJSON(t *testing.T) {
 	if _, err := Canonicalize([]byte(`{"a":`)); err == nil {
 		t.Fatal("accepted invalid JSON")
 	}
 }
 
+// TestIsULID verifies accepted and rejected ULID strings.
 func TestIsULID(t *testing.T) {
 	cases := map[string]bool{
 		testULID:                      true,

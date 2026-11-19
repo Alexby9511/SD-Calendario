@@ -120,6 +120,7 @@ type statusResponse struct {
 	CommitIndex  uint64 `json:"commit_index"`
 }
 
+// handleStatus reports node role and Raft index state.
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	addr, id := s.node.LeaderWithID()
 	writeJSON(w, http.StatusOK, statusResponse{
@@ -139,6 +140,7 @@ type commandResponse struct {
 	LogIndex uint64 `json:"log_index"`
 }
 
+// handleCommand validates, forwards or applies a JSON command.
 func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {
@@ -196,6 +198,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 // applyError extracts the rejection from an FSM response. ApplyError() is used
 // instead of the error interface so that a zero-valued result does not look
 // like a non-nil error.
+// applyError extracts a command rejection returned by the FSM.
 func applyError(response any) error {
 	type applyError interface{ ApplyError() error }
 	if result, ok := response.(applyError); ok {
@@ -207,6 +210,7 @@ func applyError(response any) error {
 	return nil
 }
 
+// forward sends a write request once to the Raft leader.
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 	addr, id := s.node.LeaderWithID()
 	if addr == "" || id == "" {
@@ -241,6 +245,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
+// handleKV reads a key from the local FSM state.
 func (s *Server) handleKV(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	if key == "" {
@@ -266,6 +271,7 @@ type errorResponse struct {
 // writeCodedError answers with the status carried by the error. Command
 // rejections implement StatusCode; anything else is a 422 because the only
 // errors that reach here come from admission or from the FSM.
+// writeCodedError writes the protocol status associated with an error.
 func writeCodedError(w http.ResponseWriter, err error) {
 	code := protocol.Unprocessable
 	var coded interface{ StatusCode() protocol.Code }
@@ -275,10 +281,12 @@ func writeCodedError(w http.ResponseWriter, err error) {
 	writeError(w, code.HTTPStatus(), err.Error())
 }
 
+// writeError writes a JSON error response with the given HTTP status.
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
 }
 
+// writeJSON serializes a JSON response and sets the HTTP status.
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

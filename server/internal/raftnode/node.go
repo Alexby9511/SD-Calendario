@@ -22,6 +22,7 @@ import (
 // with instead of straight to stderr.
 type slogWriter struct{ logger *slog.Logger }
 
+// Write forwards Raft log text to the configured slog logger.
 func (w slogWriter) Write(p []byte) (int, error) {
 	w.logger.Warn(strings.TrimSpace(string(p)))
 	return len(p), nil

@@ -1,3 +1,5 @@
+// echo_test.go verifies Echo apply, validation, and snapshot behavior.
+// It uses in-memory sinks to test deterministic state and replay.
 package fsm
 
 import (
@@ -12,6 +14,7 @@ import (
 	"github.com/Alexby9511/SD-Calendario/pkg/protocol"
 )
 
+// applyCommands applies test commands and fails the test on any rejection.
 func applyCommands(t *testing.T, e *Echo, cmds ...Command) {
 	t.Helper()
 	for _, cmd := range cmds {
@@ -29,6 +32,7 @@ func applyCommands(t *testing.T, e *Echo, cmds ...Command) {
 	}
 }
 
+// TestApplyIsDeterministic verifies identical command sequences produce identical state.
 func TestApplyIsDeterministic(t *testing.T) {
 	cmds := []Command{
 		{Op: "set", Key: "a", Value: "1"},
@@ -51,6 +55,7 @@ func TestApplyIsDeterministic(t *testing.T) {
 	}
 }
 
+// TestApplyRejectsUnknownOp verifies unsupported operations are rejected.
 func TestApplyRejectsUnknownOp(t *testing.T) {
 	e := New()
 	raw, _ := json.Marshal(Command{Op: "explode", Key: "a"})
@@ -60,6 +65,7 @@ func TestApplyRejectsUnknownOp(t *testing.T) {
 	}
 }
 
+// TestApplyRejectsEmptyKey verifies commands cannot target an empty key.
 func TestApplyRejectsEmptyKey(t *testing.T) {
 	e := New()
 	raw, _ := json.Marshal(Command{Op: "set", Key: "", Value: "x"})
@@ -71,6 +77,7 @@ func TestApplyRejectsEmptyKey(t *testing.T) {
 
 // Admission and apply must agree: whatever Validate rejects cannot be applied
 // either, otherwise a command could slip into the log by another path.
+// TestValidateMatchesApply verifies admission and application share validation outcomes.
 func TestValidateMatchesApply(t *testing.T) {
 	cases := [][]byte{
 		[]byte(`{"op":"set","key":"a","value":"1"}`),
@@ -89,6 +96,7 @@ func TestValidateMatchesApply(t *testing.T) {
 	}
 }
 
+// TestCommandErrorCarriesStatus verifies command rejections expose protocol status codes.
 func TestCommandErrorCarriesStatus(t *testing.T) {
 	raw := []byte(`{"op":"explode","key":"a"}`)
 	err := New().Validate(raw)
@@ -101,6 +109,7 @@ func TestCommandErrorCarriesStatus(t *testing.T) {
 	}
 }
 
+// TestSnapshotRoundTrip verifies snapshots persist and restore the full machine state.
 func TestSnapshotRoundTrip(t *testing.T) {
 	original := New()
 	applyCommands(t, original,
@@ -136,6 +145,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 
 // A snapshot must be a point-in-time copy: later applies to the live machine
 // cannot leak into an already taken snapshot.
+// TestSnapshotIsIsolated verifies snapshots remain unchanged by later writes.
 func TestSnapshotIsIsolated(t *testing.T) {
 	e := New()
 	applyCommands(t, e, Command{Op: "set", Key: "a", Value: "1"})
@@ -166,7 +176,11 @@ type memSink struct {
 	cancelled bool
 }
 
+// Write appends snapshot bytes to the test buffer.
 func (s *memSink) Write(p []byte) (int, error) { return s.buf.Write(p) }
-func (s *memSink) Close() error                { return nil }
-func (s *memSink) ID() string                  { return "mem" }
-func (s *memSink) Cancel() error               { s.cancelled = true; return nil }
+// Close completes the test sink without external resources.
+func (s *memSink) Close() error { return nil }
+// ID returns the test snapshot identifier.
+func (s *memSink) ID() string { return "mem" }
+// Cancel marks the test snapshot as cancelled.
+func (s *memSink) Cancel() error { s.cancelled = true; return nil }
