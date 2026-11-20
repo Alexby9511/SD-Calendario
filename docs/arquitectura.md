@@ -922,7 +922,7 @@ linealizabilidad.
 ### Stack: **Go + Wails** (decidido)
 
 ```text
-server/   Go + hashicorp/raft + boltdb   → 3 nodos en docker-compose
+server/   Python + Ray   → head, workers y API con Dockerfiles individuales
 client/   Go (store, outbox, firma) + Wails (ventana webview)
 pkg/      protocol/ compartido por ambos binarios
 ```

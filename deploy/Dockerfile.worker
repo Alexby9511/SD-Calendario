@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY pyproject.toml .
+COPY pkg ./pkg
+COPY server ./server
+COPY client ./client
+
+RUN pip install --no-cache-dir -e .
+
+CMD ["ray", "start", "--address=ray-head:6379", "--block"]

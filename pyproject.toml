@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sd-calendario-ray"
+version = "0.1.0"
+description = "Calendario distribuido prototipo con Ray"
+requires-python = ">=3.10"
+dependencies = [
+  "ray>=2.9",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "cryptography>=42",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["server/tests"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["pkg*", "server*", "client*"]

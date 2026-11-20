@@ -1,11 +1,11 @@
 # AGENTS.md — SD Calendario
 
-Calendario distribuido académico: servidor Go con Raft (`hashicorp/raft`) + cliente Wails v3. Diseño v3 **congelado**.
+Calendario distribuido académico: servidor Python con Ray + cliente local-first.
 
 ## Diseño
 
 - [`docs/arquitectura.md`](docs/arquitectura.md) es la fuente de verdad y está **congelado**: las dudas se resuelven en código y tests, no en más rondas de diseño ni en reescrituras del documento. Si se edita, citar versión + `git hash-object docs/arquitectura.md`.
-- Decisiones cerradas que **no** se deben reabrir: sin CRDT en el MVP, FSM determinista, `pkg/protocol` compartido, cliente local-first con outbox.
+- Decisiones cerradas que **no** se deben reabrir: sin CRDT en el MVP, FSM determinista, `pkg/protocol` compartido, cliente local-first con outbox y despliegue manual con Dockerfiles.
 - Reglas duras de la FSM al implementar hitos futuros: prohibido `now()`/`random()` y conversión de zonas horarias en `apply`; iteración de mapas ordenada para snapshots; sin `float`; propiedad obligatoria *replay ≡ snapshot* (§7.2 del diseño).
 
 ## Comandos
@@ -13,21 +13,20 @@ Calendario distribuido académico: servidor Go con Raft (`hashicorp/raft`) + cli
 ```bash
 go test ./...            # todo: protocolo, FSM, API HTTP y clúster de 3 nodos
 go test ./pkg/protocol/ -run TestIsULID   # un test concreto
-./deploy/demo.sh         # clúster 3 nodos en Docker (8081-8083) + fallo del líder
+./deploy/demo.sh         # head Ray, dos workers y API con docker run
 ```
 
 - El toolchain no está en PATH en esta máquina: `export PATH="$HOME/.local/go-root/usr/lib/go-1.22/bin:$PATH"` (Go 1.22 extraído de un .deb de apt; el cliente Wails necesitará el tarball 1.24+ aparte).
 
-- El módulo raíz (`go.mod` en la raíz) cubre solo `pkg/` + `server/`. El import path es `github.com/Alexby9511/SD-Calendario` (sin espacio, con mayúsculas), distinto del nombre del directorio.
-- El test de clúster (`server/internal/raftnode/cluster_test.go`) usa transports en memoria: sin puertos ni Docker, pero tarda (~timeout de elección).
+- El módulo Python raíz (`pyproject.toml`) cubre `pkg/`, `server/` y `client/`.
 
 ## Estado del código
 
-- `client/` **aún no tiene código**: solo `client/README.md` con lo decidido (Wails v3, SQLite, outbox). No compila en este entorno (falta `libwebkit2gtk-4.1-dev`; exige Go 1.24 + Node 22), y será andamio con `wails3 init`, no parte de este `go.mod`.
-- La API actual (hito 1) es `/v1/command` (singular), `/v1/kv/{key}` y `/v1/status` con una FSM de eco; **no** coincide todavía con la del diseño (`/v1/commands`, etc.). Ante conflicto diseño vs. código durante hito 1, el código es lo que se ejecuta.
-- Cliente propone por cualquier nodo y el follower reenvía al líder interno (`server/internal/api`), con lookup local **advisory** (un follower puede ir por detrás).
+- `client/` contiene la outbox SQLite; la aplicación Wails sigue siendo futura.
+- La API actual expone `/v1/commands`, `/v1/availability`, `/v1/conflicts`, `/v1/sync`, `/v1/kv/{key}` y `/v1/status`.
+- El actor `CoordinatorState` es la autoridad única; los workers Ray no mantienen estado de dominio independiente.
 - `pkg/protocol/` (sobre, JCS RFC 8785, Ed25519) lo importarán ambos binarios: nunca duplicar firma/serialización canónica en el cliente.
-- El formato de los bytes firmados está **fijado por vectores dorados** (`TestSigningInputGoldenVector` / `TestSignatureGoldenVector`): si cambian algo del sobre o del orden de campos, esos tests fallan; no "arreglarlos" para que pasen sin discutir el §6.1.
+- El formato de los bytes firmados debe permanecer canónico; no duplicar serialización fuera de `pkg/protocol`.
 
 ## Convenciones
 

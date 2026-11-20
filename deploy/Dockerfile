@@ -1,27 +1,12 @@
-# syntax=docker/dockerfile:1
+FROM python:3.12-slim
 
-FROM golang:1.22-alpine AS build
-
-WORKDIR /src
-
-# Dependencies first, so editing code does not invalidate the module cache.
-COPY go.mod go.sum ./
-RUN go mod download
-
+WORKDIR /app
+COPY pyproject.toml .
 COPY pkg ./pkg
 COPY server ./server
+COPY client ./client
 
-RUN CGO_ENABLED=0 GOOS=linux go build \
-    -trimpath -ldflags="-s -w" \
-    -o /out/sdcald ./server/cmd/sdcald
+RUN pip install --no-cache-dir -e .
 
-FROM alpine:3.20
-
-RUN adduser -D -u 10001 sdcal && mkdir -p /data && chown sdcal /data
-COPY --from=build /out/sdcald /usr/local/bin/sdcald
-
-USER sdcal
-VOLUME ["/data"]
-EXPOSE 7000 8080
-
-ENTRYPOINT ["/usr/local/bin/sdcald"]
+EXPOSE 6379 8265 10001
+CMD ["ray", "start", "--head", "--port=6379", "--ray-client-server-port=10001", "--dashboard-host=0.0.0.0", "--dashboard-port=8265", "--block"]
