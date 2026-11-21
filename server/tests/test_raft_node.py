@@ -47,14 +47,14 @@ def test_only_one_leader_when_every_node_ticks():
     assert len(leaders(nodes)) == 1
 
 
-def test_candidate_without_quorum_does_not_win():
+def test_pre_candidate_without_quorum_does_not_change_term():
     clock, network, nodes = cluster()
     for peer in ("n2", "n3", "n4"):
         network.cut("n0", peer)
     clock.advance(1.0)
     nodes["n0"].tick()
-    assert nodes["n0"].role is Role.CANDIDATE
-    assert nodes["n0"].current_term == 1
+    assert nodes["n0"].role is Role.PRE_CANDIDATE
+    assert nodes["n0"].current_term == 0
 
 
 def test_split_vote_is_resolved_after_healing():
@@ -66,14 +66,16 @@ def test_split_vote_is_resolved_after_healing():
     clock.advance(1.0)
     nodes["n0"].tick()
     nodes["n1"].tick()
-    assert nodes["n0"].role is Role.CANDIDATE
-    assert nodes["n1"].role is Role.CANDIDATE
+    assert nodes["n0"].role is Role.PRE_CANDIDATE
+    assert nodes["n1"].role is Role.PRE_CANDIDATE
+    assert nodes["n0"].current_term == 0
+    assert nodes["n1"].current_term == 0
 
     network.heal()
     clock.advance(1.0)
     nodes["n0"].tick()
     assert nodes["n0"].role is Role.LEADER
-    assert nodes["n0"].current_term == 2
+    assert nodes["n0"].current_term == 1
 
 
 def test_follower_elects_new_leader_after_leader_failure():

@@ -14,6 +14,29 @@ class LogEntry:
 
 
 @dataclass(frozen=True)
+class PreVote:
+    """Candidate asks whether peers would vote in a prospective term.
+
+    ``prospective_term`` is the term the candidate would use if the pre-vote
+    succeeds. A voter must not change its current term or vote when handling
+    this message.
+    """
+
+    prospective_term: int
+    candidate_id: str
+    last_log_index: int
+    last_log_term: int
+
+
+@dataclass(frozen=True)
+class PreVoteResponse:
+    """Reply to :class:`PreVote`."""
+
+    term: int
+    vote_granted: bool
+
+
+@dataclass(frozen=True)
 class RequestVote:
     """Candidate asks a peer for its vote in ``term``."""
 

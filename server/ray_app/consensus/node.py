@@ -1,4 +1,4 @@
-"""Single-node Raft state machine: elections and heartbeats.
+"""Single-node Raft state machine: pre-vote, elections and heartbeats.
 
 The node is transport- and clock-agnostic so the consensus core can be tested
 without Ray. It is intentionally single-threaded: the Ray wrapper must serialize
@@ -17,6 +17,8 @@ from .messages import (
     InstallSnapshot,
     InstallSnapshotResponse,
     LogEntry,
+    PreVote,
+    PreVoteResponse,
     RequestVote,
     RequestVoteResponse,
 )
@@ -28,6 +30,7 @@ class Role(str, Enum):
     """Raft role of a replica."""
 
     FOLLOWER = "follower"
+    PRE_CANDIDATE = "pre_candidate"
     CANDIDATE = "candidate"
     LEADER = "leader"
 
@@ -89,12 +92,16 @@ class RaftNode:
         self._results: Dict[int, Any] = {}
         self._election_timeout = election_timeout
         self._heartbeat_interval = heartbeat_interval
+        self._minimum_election_timeout = min(election_timeout)
         self._random = random_source or random.Random()
         self._votes: Set[str] = set()
+        self._pre_votes: Set[str] = set()
+        self._pre_vote_term: Optional[int] = None
         self._next_index: Dict[str, int] = {}
         self._match_index: Dict[str, int] = {}
         self._election_deadline = 0.0
         self._heartbeat_deadline = 0.0
+        self._last_leader_contact: Optional[float] = None
         self._reset_election_deadline()
         if storage is not None:
             self._restore_stored_snapshot()
@@ -129,12 +136,58 @@ class RaftNode:
             self.start_election()
 
     def start_election(self) -> None:
-        """Become a candidate and request votes from every peer."""
-        self.current_term += 1
+        """Run a pre-vote round and start a real election after a quorum.
+
+        The current term and vote are left untouched during the pre-vote. A
+        partitioned or restarted replica therefore cannot force a healthy
+        leader to step down merely by reconnecting.
+        """
+        if self.role is Role.LEADER:
+            return
+        if self._leader_lease_active():
+            self._reset_election_deadline()
+            return
+
+        prospective_term = self.current_term + 1
+        self.role = Role.PRE_CANDIDATE
+        self.leader_id = None
+        self._pre_vote_term = prospective_term
+        self._pre_votes = {self.node_id}
+        self._reset_election_deadline()
+
+        message = PreVote(
+            prospective_term=prospective_term,
+            candidate_id=self.node_id,
+            last_log_index=self.log.last_index,
+            last_log_term=self.log.last_term,
+        )
+        for peer in self.peers:
+            try:
+                response = self.transport.send(self.node_id, peer, message)
+            except TransportError:
+                continue
+            self.handle_pre_vote_response(peer, response)
+            if self.role is not Role.PRE_CANDIDATE:
+                break
+        if self.role is Role.PRE_CANDIDATE and len(self._pre_votes) >= self.quorum:
+            self._start_candidate_term()
+
+    def _start_candidate_term(self) -> None:
+        """Increment the term and request binding votes after a pre-vote."""
+        if self.role is not Role.PRE_CANDIDATE:
+            return
+        if self._pre_vote_term != self.current_term + 1:
+            return
+        if len(self._pre_votes) < self.quorum:
+            return
+
+        self.current_term = self._pre_vote_term
         self.role = Role.CANDIDATE
         self.voted_for = self.node_id
         self.leader_id = None
         self._votes = {self.node_id}
+        self._pre_votes = set()
+        self._pre_vote_term = None
         self._persist_meta()
         self._reset_election_deadline()
 
@@ -204,6 +257,8 @@ class RaftNode:
 
     def handle_message(self, message: Any) -> Any:
         """Dispatch an incoming RPC to its handler."""
+        if isinstance(message, PreVote):
+            return self.handle_pre_vote(message)
         if isinstance(message, RequestVote):
             return self.handle_request_vote(message)
         if isinstance(message, AppendEntries):
@@ -211,6 +266,44 @@ class RaftNode:
         if isinstance(message, InstallSnapshot):
             return self.handle_install_snapshot(message)
         raise TypeError(f"raft: unsupported message {type(message).__name__}")
+
+    def handle_pre_vote(self, message: PreVote) -> PreVoteResponse:
+        """Answer whether this replica would vote in the prospective term.
+
+        Handling a pre-vote never changes the current term or the recorded
+        vote. A voter that has heard from the current leader during the
+        baseline election timeout also refuses the pre-vote, so a recovering
+        replica cannot disrupt a healthy leader.
+        """
+        if message.prospective_term <= self.current_term:
+            return PreVoteResponse(self.current_term, False)
+        if self.role is Role.LEADER or self._leader_lease_active():
+            return PreVoteResponse(self.current_term, False)
+
+        # The vote is for a new prospective term, so a vote recorded in the
+        # current term does not constrain it. Log freshness still applies.
+        up_to_date = (
+            message.last_log_term > self.log.last_term
+            or (
+                message.last_log_term == self.log.last_term
+                and message.last_log_index >= self.log.last_index
+            )
+        )
+        return PreVoteResponse(self.current_term, up_to_date)
+
+    def handle_pre_vote_response(
+        self, peer: str, response: PreVoteResponse
+    ) -> None:
+        """Count a pre-vote response without changing the current term."""
+        if response.term > self.current_term:
+            self._become_follower(response.term)
+            return
+        if self.role is not Role.PRE_CANDIDATE:
+            return
+        if response.term != self.current_term:
+            return
+        if response.vote_granted:
+            self._pre_votes.add(peer)
 
     def handle_request_vote(self, message: RequestVote) -> RequestVoteResponse:
         if message.term < self.current_term:
@@ -255,6 +348,7 @@ class RaftNode:
         else:
             self.role = Role.FOLLOWER
         self.leader_id = message.leader_id
+        self._last_leader_contact = self.clock.now()
         self._reset_election_deadline()
 
         if message.prev_log_index < self.log.snapshot_index:
@@ -319,6 +413,7 @@ class RaftNode:
         else:
             self.role = Role.FOLLOWER
         self.leader_id = message.leader_id
+        self._last_leader_contact = self.clock.now()
         self._reset_election_deadline()
 
         if message.last_included_index <= self.log.snapshot_index:
@@ -466,14 +561,20 @@ class RaftNode:
         if term > self.current_term:
             self.current_term = term
             self.voted_for = None
+            self._last_leader_contact = None
             self._persist_meta()
         self.role = Role.FOLLOWER
         self.leader_id = None
+        self._pre_votes = set()
+        self._pre_vote_term = None
         self._reset_election_deadline()
 
     def _become_leader(self) -> None:
         self.role = Role.LEADER
         self.leader_id = self.node_id
+        self._last_leader_contact = self.clock.now()
+        self._pre_votes = set()
+        self._pre_vote_term = None
         self._next_index = {peer: self.log.last_index + 1 for peer in self.peers}
         self._match_index = {peer: 0 for peer in self.peers}
         self._reset_heartbeat_deadline()
@@ -504,6 +605,13 @@ class RaftNode:
     def _reset_election_deadline(self) -> None:
         low, high = self._election_timeout
         self._election_deadline = self.clock.now() + self._random.uniform(low, high)
+
+    def _leader_lease_active(self) -> bool:
+        """Return whether a recent heartbeat still protects the current leader."""
+        if self._last_leader_contact is None:
+            return False
+        elapsed = self.clock.now() - self._last_leader_contact
+        return elapsed < self._minimum_election_timeout
 
     def _reset_heartbeat_deadline(self) -> None:
         self._heartbeat_deadline = self.clock.now() + self._heartbeat_interval

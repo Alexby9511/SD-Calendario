@@ -9,6 +9,8 @@ from .messages import (
     InstallSnapshot,
     InstallSnapshotResponse,
     LogEntry,
+    PreVote,
+    PreVoteResponse,
     RequestVote,
     RequestVoteResponse,
 )
@@ -25,6 +27,8 @@ __all__ = [
     "InstallSnapshotResponse",
     "LogEntry",
     "NotLeaderError",
+    "PreVote",
+    "PreVoteResponse",
     "RaftLog",
     "RaftNode",
     "RealClock",

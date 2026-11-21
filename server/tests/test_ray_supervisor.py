@@ -78,14 +78,19 @@ def test_supervisor_recreates_a_killed_replica(supervised_cluster):
     cluster, actors, namespace = supervised_cluster
     leader_id = wait_for_leader(cluster)
     assert leader_id is not None
+    leader_term = cluster.statuses()[leader_id]["term"]
     victim = [node_id for node_id in actors if node_id != leader_id][0]
 
     ray.kill(actors[victim])
     assert wait_until(lambda: victim in cluster.statuses())
+    assert wait_until(
+        lambda: cluster.statuses().get(victim, {}).get("role") == "follower"
+    )
 
     statuses = cluster.statuses()
-    assert statuses[victim]["role"] in ("follower", "candidate")
     assert statuses[victim]["leader_id"] == leader_id
+    assert statuses[leader_id]["role"] == "leader"
+    assert statuses[leader_id]["term"] == leader_term
 
 
 def test_recreated_replica_catches_up_with_the_leader(supervised_cluster):
