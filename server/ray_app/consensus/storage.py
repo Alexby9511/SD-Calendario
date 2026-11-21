@@ -9,7 +9,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple
 
 from .messages import LogEntry
 
@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS log (
     idx INTEGER PRIMARY KEY,
     term INTEGER NOT NULL,
     command TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS snapshot (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_included_index INTEGER NOT NULL,
+    last_included_term INTEGER NOT NULL,
+    data BLOB NOT NULL
 );
 """
 
@@ -55,6 +61,17 @@ class Storage(Protocol):
 
     def save_log(self, entries: Iterable[LogEntry], replace: bool = False) -> None:
         """Persist entries atomically, optionally replacing the whole log."""
+
+    def save_snapshot(
+        self,
+        last_included_index: int,
+        last_included_term: int,
+        data: bytes,
+    ) -> None:
+        """Persist a snapshot and drop the compacted log prefix atomically."""
+
+    def load_snapshot(self) -> Optional[Tuple[int, int, bytes]]:
+        """Return ``(index, term, data)`` or ``None`` when no snapshot exists."""
 
 
 class SQLiteStorage:
@@ -132,3 +149,41 @@ class SQLiteStorage:
                 "INSERT OR REPLACE INTO log(idx, term, command) VALUES (?, ?, ?)",
                 rows,
             )
+
+    def save_snapshot(
+        self,
+        last_included_index: int,
+        last_included_term: int,
+        data: bytes,
+    ) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO snapshot"
+                "(id, last_included_index, last_included_term, data) "
+                "VALUES (1, ?, ?, ?)",
+                (last_included_index, last_included_term, data),
+            )
+            self._connection.executemany(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                [
+                    ("snapshot_index", _encode(last_included_index)),
+                    ("snapshot_term", _encode(last_included_term)),
+                ],
+            )
+            self._connection.execute(
+                "DELETE FROM log WHERE idx <= ?", (last_included_index,)
+            )
+
+    def load_snapshot(self) -> Optional[Tuple[int, int, bytes]]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT last_included_index, last_included_term, data "
+                "FROM snapshot WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            int(row["last_included_index"]),
+            int(row["last_included_term"]),
+            bytes(row["data"]),
+        )

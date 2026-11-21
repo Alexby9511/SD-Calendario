@@ -41,10 +41,10 @@ class NotLeaderError(Exception):
 
 
 class RaftNode:
-    """Raft replica with elections, replication, commit and apply.
+    """Raft replica with elections, replication, commit, apply and snapshots.
 
     State is in memory unless ``storage`` is provided, in which case the term,
-    vote and log survive restarts. Snapshot install is not implemented yet.
+    vote, log and snapshot survive restarts.
     """
 
     def __init__(
@@ -58,12 +58,17 @@ class RaftNode:
         random_source: Optional[random.Random] = None,
         apply_command: Optional[Callable[[Dict[str, Any]], Any]] = None,
         storage: Optional[Storage] = None,
+        snapshot_provider: Optional[Callable[[], bytes]] = None,
+        snapshot_restorer: Optional[Callable[[bytes], None]] = None,
     ) -> None:
         self.node_id = node_id
         self.peers = [peer for peer in peers if peer != node_id]
         self.transport = transport
         self.clock = clock or RealClock()
         self.storage = storage
+        self._snapshot_provider = snapshot_provider
+        self._snapshot_restorer = snapshot_restorer
+        self._snapshot_data: Optional[bytes] = None
         self.log = RaftLog()
         self.role = Role.FOLLOWER
         self.current_term = 0
@@ -91,6 +96,21 @@ class RaftNode:
         self._election_deadline = 0.0
         self._heartbeat_deadline = 0.0
         self._reset_election_deadline()
+        if storage is not None:
+            self._restore_stored_snapshot()
+
+    def _restore_stored_snapshot(self) -> None:
+        snapshot = self.storage.load_snapshot() if self.storage is not None else None
+        if snapshot is None:
+            return
+        index, term, data = snapshot
+        if index != self.log.snapshot_index or term != self.log.snapshot_term:
+            raise ValueError("raft: snapshot and meta disagree")
+        self._snapshot_data = data
+        if self._snapshot_restorer is not None:
+            self._snapshot_restorer(data)
+            self.commit_index = index
+            self.last_applied = index
 
     @property
     def quorum(self) -> int:
@@ -156,6 +176,31 @@ class RaftNode:
         if self.commit_index >= entry.index:
             return self._results.get(entry.index)
         return None
+
+    def take_snapshot(self) -> bool:
+        """Compact the applied prefix and persist a state-machine snapshot.
+
+        Returns ``False`` when there is nothing new to compact. The snapshot
+        provider must return ``bytes``; the format belongs to the state machine.
+        """
+        if self._snapshot_provider is None:
+            raise RuntimeError("raft: snapshot provider is not configured")
+        index = self.last_applied
+        if index <= self.log.snapshot_index:
+            return False
+        term = self.log.term_at(index)
+        data = self._snapshot_provider()
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("raft: snapshot provider must return bytes")
+        data = bytes(data)
+        self._persist_snapshot(index, term, data)
+        self.log.compact(index)
+        self._snapshot_data = data
+        self._persist_log()
+        self._results = {
+            key: value for key, value in self._results.items() if key > index
+        }
+        return True
 
     def handle_message(self, message: Any) -> Any:
         """Dispatch an incoming RPC to its handler."""
@@ -267,7 +312,36 @@ class RaftNode:
     def handle_install_snapshot(
         self, message: InstallSnapshot
     ) -> InstallSnapshotResponse:
-        raise NotImplementedError("raft: snapshot install is not implemented yet")
+        if message.term < self.current_term:
+            return InstallSnapshotResponse(self.current_term, False)
+        if message.term > self.current_term:
+            self._become_follower(message.term)
+        else:
+            self.role = Role.FOLLOWER
+        self.leader_id = message.leader_id
+        self._reset_election_deadline()
+
+        if message.last_included_index <= self.log.snapshot_index:
+            return InstallSnapshotResponse(self.current_term, True)
+        if message.last_included_index <= self.commit_index:
+            return InstallSnapshotResponse(self.current_term, True)
+
+        self._restore_snapshot(message.data)
+        self._persist_snapshot(
+            message.last_included_index,
+            message.last_included_term,
+            message.data,
+        )
+        self.log = RaftLog(
+            snapshot_index=message.last_included_index,
+            snapshot_term=message.last_included_term,
+        )
+        self.commit_index = message.last_included_index
+        self.last_applied = message.last_included_index
+        self._snapshot_data = message.data
+        self._results = {}
+        self._persist_log()
+        return InstallSnapshotResponse(self.current_term, True)
 
     def send_heartbeats(self) -> None:
         """Replicate pending entries (or send an empty heartbeat) to every peer."""
@@ -284,7 +358,9 @@ class RaftNode:
         while self.role is Role.LEADER:
             next_index = self._next_index.get(peer, self.log.last_index + 1)
             if next_index <= self.log.snapshot_index:
-                return False  # snapshot install is not implemented yet
+                if not self._send_snapshot(peer):
+                    return False
+                continue
             prev_index = next_index - 1
             try:
                 prev_term = self.log.term_at(prev_index)
@@ -316,6 +392,35 @@ class RaftNode:
             if self._next_index.get(peer, previous_next) >= previous_next:
                 return False
         return False
+
+    def _send_snapshot(self, peer: str) -> bool:
+        """Send the latest compacted state to a peer that fell behind."""
+        if self._snapshot_data is None:
+            return False
+        message = InstallSnapshot(
+            term=self.current_term,
+            leader_id=self.node_id,
+            last_included_index=self.log.snapshot_index,
+            last_included_term=self.log.snapshot_term,
+            data=self._snapshot_data,
+        )
+        try:
+            response = self.transport.send(self.node_id, peer, message)
+        except TransportError:
+            return False
+        if response.term > self.current_term:
+            self._become_follower(response.term)
+            return False
+        if self.role is not Role.LEADER or response.term != self.current_term:
+            return False
+        if not response.success:
+            return False
+        self._next_index[peer] = self.log.snapshot_index + 1
+        self._match_index[peer] = max(
+            self._match_index.get(peer, 0), self.log.snapshot_index
+        )
+        self._advance_commit()
+        return True
 
     def _advance_commit(self) -> None:
         if self.role is not Role.LEADER:
@@ -353,6 +458,8 @@ class RaftNode:
             "last_applied": self.last_applied,
             "last_log_index": self.log.last_index,
             "last_log_term": self.log.last_term,
+            "snapshot_index": self.log.snapshot_index,
+            "snapshot_term": self.log.snapshot_term,
         }
 
     def _become_follower(self, term: int) -> None:
@@ -384,6 +491,15 @@ class RaftNode:
     def _persist_log(self) -> None:
         if self.storage is not None:
             self.storage.save_log(self.log.entries, replace=True)
+
+    def _persist_snapshot(self, index: int, term: int, data: bytes) -> None:
+        if self.storage is not None:
+            self.storage.save_snapshot(index, term, data)
+
+    def _restore_snapshot(self, data: bytes) -> None:
+        if self._snapshot_restorer is None:
+            raise RuntimeError("raft: snapshot restorer is not configured")
+        self._snapshot_restorer(data)
 
     def _reset_election_deadline(self) -> None:
         low, high = self._election_timeout
