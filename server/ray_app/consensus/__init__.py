@@ -2,6 +2,7 @@
 
 from .clock import Clock, FakeClock, RealClock
 from .log import RaftLog
+from .node import RaftNode, Role
 from .messages import (
     AppendEntries,
     AppendEntriesResponse,
@@ -23,7 +24,9 @@ __all__ = [
     "InstallSnapshotResponse",
     "LogEntry",
     "RaftLog",
+    "RaftNode",
     "RealClock",
+    "Role",
     "RequestVote",
     "RequestVoteResponse",
     "TransportError",
