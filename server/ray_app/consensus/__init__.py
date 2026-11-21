@@ -12,6 +12,7 @@ from .messages import (
     RequestVote,
     RequestVoteResponse,
 )
+from .storage import SQLiteStorage, Storage
 from .transport import InMemoryNetwork, TransportError
 
 __all__ = [
@@ -30,5 +31,7 @@ __all__ = [
     "Role",
     "RequestVote",
     "RequestVoteResponse",
+    "SQLiteStorage",
+    "Storage",
     "TransportError",
 ]

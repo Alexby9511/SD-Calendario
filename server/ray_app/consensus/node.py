@@ -20,6 +20,7 @@ from .messages import (
     RequestVote,
     RequestVoteResponse,
 )
+from .storage import Storage
 from .transport import TransportError
 
 
@@ -40,10 +41,10 @@ class NotLeaderError(Exception):
 
 
 class RaftNode:
-    """Raft replica with elections and heartbeats.
+    """Raft replica with elections, replication, commit and apply.
 
-    Log replication and commit/apply are not implemented yet; ``AppendEntries``
-    is accepted and stored so the next step can build on it.
+    State is in memory unless ``storage`` is provided, in which case the term,
+    vote and log survive restarts. Snapshot install is not implemented yet.
     """
 
     def __init__(
@@ -56,15 +57,26 @@ class RaftNode:
         heartbeat_interval: float = 0.05,
         random_source: Optional[random.Random] = None,
         apply_command: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        storage: Optional[Storage] = None,
     ) -> None:
         self.node_id = node_id
         self.peers = [peer for peer in peers if peer != node_id]
         self.transport = transport
         self.clock = clock or RealClock()
+        self.storage = storage
         self.log = RaftLog()
         self.role = Role.FOLLOWER
         self.current_term = 0
         self.voted_for: Optional[str] = None
+        if storage is not None:
+            meta = storage.load_meta()
+            self.current_term = int(meta.get("current_term", 0))
+            self.voted_for = meta.get("voted_for")
+            self.log = RaftLog(
+                storage.load_log(),
+                snapshot_index=int(meta.get("snapshot_index", 0)),
+                snapshot_term=int(meta.get("snapshot_term", 0)),
+            )
         self.leader_id: Optional[str] = None
         self.commit_index = 0
         self.last_applied = 0
@@ -103,6 +115,7 @@ class RaftNode:
         self.voted_for = self.node_id
         self.leader_id = None
         self._votes = {self.node_id}
+        self._persist_meta()
         self._reset_election_deadline()
 
         message = RequestVote(
@@ -119,6 +132,8 @@ class RaftNode:
             self.handle_request_vote_response(peer, response)
             if self.role is not Role.CANDIDATE:
                 break
+        if self.role is Role.CANDIDATE and len(self._votes) >= self.quorum:
+            self._become_leader()
 
     def propose(self, command: Dict[str, Any]) -> Any:
         """Append a client command and return its result once committed.
@@ -135,6 +150,7 @@ class RaftNode:
             command=command,
         )
         self.log.append(entry)
+        self._persist_log()
         self._replicate_all()
         self._advance_commit()
         if self.commit_index >= entry.index:
@@ -167,6 +183,7 @@ class RaftNode:
         can_vote = self.voted_for in (None, message.candidate_id)
         if can_vote and up_to_date:
             self.voted_for = message.candidate_id
+            self._persist_meta()
             self._reset_election_deadline()
             return RequestVoteResponse(self.current_term, True)
         return RequestVoteResponse(self.current_term, False)
@@ -218,6 +235,8 @@ class RaftNode:
             message.prev_log_index, message.prev_log_term, message.entries
         ):
             return AppendEntriesResponse(self.current_term, False)
+        if message.entries:
+            self._persist_log()
 
         if message.leader_commit > self.commit_index:
             self.commit_index = min(message.leader_commit, self.log.last_index)
@@ -340,6 +359,7 @@ class RaftNode:
         if term > self.current_term:
             self.current_term = term
             self.voted_for = None
+            self._persist_meta()
         self.role = Role.FOLLOWER
         self.leader_id = None
         self._reset_election_deadline()
@@ -351,6 +371,19 @@ class RaftNode:
         self._match_index = {peer: 0 for peer in self.peers}
         self._reset_heartbeat_deadline()
         self.send_heartbeats()
+
+    def _persist_meta(self) -> None:
+        if self.storage is not None:
+            self.storage.save_meta(
+                self.current_term,
+                self.voted_for,
+                self.log.snapshot_index,
+                self.log.snapshot_term,
+            )
+
+    def _persist_log(self) -> None:
+        if self.storage is not None:
+            self.storage.save_log(self.log.entries, replace=True)
 
     def _reset_election_deadline(self) -> None:
         low, high = self._election_timeout
