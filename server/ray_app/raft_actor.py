@@ -8,7 +8,7 @@ from deadlocking two actors.
 """
 
 import json
-from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol
+from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Tuple
 
 from .consensus.clock import RealClock
 from .consensus.node import RaftNode
@@ -65,7 +65,9 @@ class RaftReplica:
         db_path: str,
         state_factory: Callable[[], ReplicatedState] = CalendarState,
         namespace: str = DEFAULT_NAMESPACE,
-        transport_timeout: float = 0.5,
+        transport_timeout: float = 0.1,
+        election_timeout: Tuple[float, float] = (0.5, 1.5),
+        heartbeat_interval: float = 0.05,
     ) -> None:
         self.state = state_factory()
         self.storage = SQLiteStorage(db_path)
@@ -74,6 +76,8 @@ class RaftReplica:
             peers,
             RayTransport(namespace=namespace, timeout=transport_timeout),
             clock=RealClock(),
+            election_timeout=election_timeout,
+            heartbeat_interval=heartbeat_interval,
             apply_command=self.state.apply,
             storage=self.storage,
             snapshot_provider=self.state.snapshot,

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .consensus.node import NotLeaderError
 from .consensus.transport import TransportError
-from .raft_transport import DEFAULT_NAMESPACE
+from .raft_transport import DEFAULT_ACTOR_PREFIX, DEFAULT_NAMESPACE, actor_name
 
 try:
     import ray
@@ -29,19 +29,38 @@ class RaftCluster:
 
     def __init__(
         self,
-        actors: Dict[str, Any],
+        replicas: Any = None,
         namespace: str = DEFAULT_NAMESPACE,
         timeout: float = 3.0,
+        actor_prefix: str = DEFAULT_ACTOR_PREFIX,
     ) -> None:
-        self.actors = dict(actors)
+        if isinstance(replicas, dict):
+            self.node_ids: List[str] = list(replicas)
+        elif replicas is None:
+            self.node_ids = []
+        else:
+            self.node_ids = list(replicas)
         self.namespace = namespace
         self.timeout = timeout
+        self.actor_prefix = actor_prefix
+
+    def actor(self, node_id: str) -> Any:
+        """Resolve the actor of a replica by name.
+
+        The handle is looked up on every call, so the cluster follows a
+        replica that the supervisor recreated after a crash.
+        """
+        return ray.get_actor(
+            actor_name(node_id, self.actor_prefix),
+            namespace=self.namespace,
+        )
 
     def statuses(self) -> Dict[str, Dict[str, Any]]:
         """Return the status of every reachable replica."""
         result: Dict[str, Dict[str, Any]] = {}
-        for node_id, actor in self.actors.items():
+        for node_id in self.node_ids:
             try:
+                actor = self.actor(node_id)
                 result[node_id] = ray.get(
                     actor.status.remote(), timeout=self.timeout
                 )
@@ -75,7 +94,7 @@ class RaftCluster:
                 raise NoLeaderError("raft: no leader available")
             try:
                 return ray.get(
-                    self.actors[leader_id].propose.remote(command),
+                    self.actor(leader_id).propose.remote(command),
                     timeout=self.timeout,
                 )
             except (NotLeaderError, TransportError) + _RAY_ERRORS as exc:
@@ -98,7 +117,7 @@ class RaftCluster:
         leader_id = self.leader()
         if leader_id is None:
             raise NoLeaderError("raft: no leader available")
-        actor = self.actors[leader_id]
+        actor = self.actor(leader_id)
         return ray.get(
             getattr(actor, method).remote(*args),
             timeout=self.timeout,

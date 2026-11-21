@@ -18,6 +18,7 @@ def start_raft_cluster(
     from server.ray_app.api import set_cluster
     from server.ray_app.raft_actor import start_raft_cluster as start_replicas
     from server.ray_app.raft_cluster import RaftCluster
+    from server.ray_app.raft_supervisor import start_supervisor
     from server.ray_app.raft_ticker import start_tickers
 
     node_ids = [f"n{index}" for index in range(replicas)]
@@ -27,6 +28,7 @@ def start_raft_cluster(
     }
     actors = start_replicas(node_ids, db_paths, namespace=namespace)
     start_tickers(actors, namespace=namespace)
+    start_supervisor(node_ids, db_paths, namespace=namespace)
     set_cluster(RaftCluster(actors, namespace=namespace))
 
 
