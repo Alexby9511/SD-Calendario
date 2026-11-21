@@ -185,10 +185,10 @@ export function CalendarGrid(props: Props) {
       {days.map((day, i) => (
         <div key={i} className="day-heading">
           <span>{day.toLocaleDateString("es", { weekday: "short" }).toUpperCase()}</span>
-          <b className={
-            day.toDateString() === now.toDateString() ? "today" :
+          <b className={[
+            day.toDateString() === now.toDateString() ? "today" : "",
             day.toDateString() === props.date.toDateString() ? "active-date" : ""
-          }>{day.getDate()}</b>
+          ].filter(Boolean).join(" ")}>{day.getDate()}</b>
         </div>
       ))}
       {hours.map((hour) => (

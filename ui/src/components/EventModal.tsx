@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { AlertTriangle, CalendarPlus, MapPin, Users, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, CalendarPlus, MapPin, User, Users, X } from "lucide-react";
 
 interface Props {
   open: boolean;
+  initialMode: "personal" | "group";
   user: string;
   availability: Record<string, { start: string; end: string }[]>;
   onClose: () => void;
@@ -23,6 +24,10 @@ export function EventModal(props: Props) {
   const conflicts = participants.some((user) =>
     (props.availability[user] ?? []).some((window) => start.replace("T", " ") < window.end && window.start < end.replace("T", " "))
   );
+
+  useEffect(() => {
+    if (props.open) setTab(props.initialMode);
+  }, [props.open, props.initialMode]);
 
   if (!props.open) return null;
 
@@ -50,7 +55,7 @@ export function EventModal(props: Props) {
           <button className="icon-button" onClick={props.onClose}><X size={18} /></button>
         </header>
         <div className="modal-tabs">
-          <button className={tab === "personal" ? "active" : ""} onClick={() => setTab("personal")}>Evento personal</button>
+          <button className={tab === "personal" ? "active" : ""} onClick={() => setTab("personal")}><User size={14} /> Evento personal</button>
           <button className={tab === "group" ? "active" : ""} onClick={() => setTab("group")}><Users size={14} /> Reunión de grupo</button>
         </div>
         <div className="modal-body">

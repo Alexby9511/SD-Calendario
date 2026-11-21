@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, Plus, Search, User, Users } from "lucide-react";
 import type { GroupEvent } from "../types/protocol";
 
 interface Props {
@@ -7,7 +7,7 @@ interface Props {
   events: GroupEvent[];
   busyUsers: string[];
   onBusyUsers: (users: string[]) => void;
-  onCreate: () => void;
+  onCreate: (mode: "personal" | "group") => void;
   onSelectEvent: (event: GroupEvent) => void;
   showCancelled: boolean;
   onShowCancelled: (show: boolean) => void;
@@ -54,8 +54,8 @@ export function Sidebar(props: Props) {
       <div className="create-wrap">
         <button className="create-button" onClick={() => setCreateMenu((open) => !open)}><Plus size={20} /> Crear</button>
         {createMenu && <div className="create-menu">
-          <button onClick={() => { props.onCreate(); setCreateMenu(false); }}>Evento personal</button>
-          <button onClick={() => { props.onCreate(); setCreateMenu(false); }}>Reunión de grupo</button>
+          <button onClick={() => { props.onCreate("personal"); setCreateMenu(false); }}><User size={14} /> Evento personal</button>
+          <button onClick={() => { props.onCreate("group"); setCreateMenu(false); }}><Users size={14} /> Reunión de grupo</button>
         </div>}
       </div>
 
@@ -80,7 +80,7 @@ export function Sidebar(props: Props) {
                 className={[
                   cellDate.getMonth() !== month ? "muted" : "",
                   isToday ? "today" : "",
-                  isActive && !isToday ? "active-date" : "",
+                  isActive ? "active-date" : "",
                   inActiveWeek ? "active-week" : ""
                 ].filter(Boolean).join(" ")}
               >

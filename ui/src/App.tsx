@@ -23,6 +23,7 @@ export default function App() {
   const [offline, setOffline] = useState(false);
   const [online, setOnline] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [createMode, setCreateMode] = useState<"personal" | "group">("personal");
   const [detailEvent, setDetailEvent] = useState<GroupEvent | null>(null);
   const [showCancelled, setShowCancelled] = useState(false);
   const [busyUsers, setBusyUsers] = useState(["bob"]);
@@ -87,6 +88,11 @@ export default function App() {
   }, [offline, busyUsers]);
 
   const title = date.toLocaleDateString("es", { month: "long", year: "numeric" });
+
+  const openCreate = (mode: "personal" | "group" = "personal") => {
+    setCreateMode(mode);
+    setCreateOpen(true);
+  };
 
   const buildEnvelope = (type: EnvelopeType, uid: string, sequence: number, payload: Record<string, unknown>): Promise<Envelope> =>
     signEnvelope({
@@ -301,7 +307,7 @@ export default function App() {
       />
       <div className="workspace">
         <Sidebar date={date} events={events} busyUsers={busyUsers} onBusyUsers={setBusyUsers}
-          onCreate={() => setCreateOpen(true)} onSelectEvent={setDetailEvent}
+          onCreate={openCreate} onSelectEvent={setDetailEvent}
           showCancelled={showCancelled} onShowCancelled={setShowCancelled} view={view}
           onMoveMonth={(direction) => setDate((current) => {
             const next = new Date(current);
@@ -315,7 +321,7 @@ export default function App() {
         <div className={`calendar-transition calendar-${navDirection}`} key={`${view}-${date.toISOString().slice(0, 10)}`}>
           <CalendarGrid view={view} date={date} events={events} personalEvents={personalEvents}
             busyUsers={busyUsers} availability={availabilityMap} showCancelled={showCancelled}
-            onSelect={setDetailEvent} onQuickCreate={() => setCreateOpen(true)}
+            onSelect={setDetailEvent} onQuickCreate={() => openCreate()}
             onNavigateDate={(nextDate, nextView = "Día") => {
               setNavDirection("next");
               setDate(nextDate);
@@ -325,7 +331,7 @@ export default function App() {
       </div>
       <DistributedInspector open={inspectorOpen} outbox={outbox} entries={entries} cursor={cursor}
         onToggle={() => setInspectorOpen((open) => !open)} />
-      <EventModal open={createOpen} user={user} availability={availabilityMap}
+      <EventModal open={createOpen} initialMode={createMode} user={user} availability={availabilityMap}
         onClose={() => setCreateOpen(false)} onSavePersonal={savePersonal} onSaveGroup={saveGroup} />
       <EventDetailModal event={detailEvent} attendance={attendance}
         onClose={() => setDetailEvent(null)} onReply={sendReply}
