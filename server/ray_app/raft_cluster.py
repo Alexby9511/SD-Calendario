@@ -4,7 +4,7 @@ The API talks to a cluster, not to a single replica: it needs to find the
 current leader, forward writes to it and aggregate the state of every replica.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .consensus.node import NotLeaderError
 from .consensus.transport import TransportError
@@ -92,3 +92,38 @@ class RaftCluster:
             "leader_id": self.leader(statuses),
             "replicas": statuses,
         }
+
+    def call_leader(self, method: str, *args: Any) -> Any:
+        """Call a read-only method on the current leader."""
+        leader_id = self.leader()
+        if leader_id is None:
+            raise NoLeaderError("raft: no leader available")
+        actor = self.actors[leader_id]
+        return ray.get(
+            getattr(actor, method).remote(*args),
+            timeout=self.timeout,
+        )
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Return the state machine snapshot held by the leader."""
+        return self.call_leader("state_snapshot")
+
+    def availability(
+        self,
+        users: Optional[List[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.call_leader("availability", users, start, end)
+
+    def conflicts(
+        self,
+        user: str,
+        start: str,
+        end: str,
+        exclude_uid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.call_leader("conflicts", user, start, end, exclude_uid)
+
+    def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
+        return self.call_leader("sync", since, limit)

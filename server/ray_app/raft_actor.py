@@ -7,6 +7,7 @@ RPC handlers never send RPCs themselves; only ``tick``, ``start_election``,
 from deadlocking two actors.
 """
 
+import json
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol
 
 from .consensus.clock import RealClock
@@ -32,6 +33,26 @@ class ReplicatedState(Protocol):
 
     def restore(self, data: bytes) -> None:
         """Replace the whole state from a snapshot."""
+
+    def availability(
+        self,
+        users: Optional[List[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return the busy windows of the requested users."""
+
+    def conflicts(
+        self,
+        user: str,
+        start: str,
+        end: str,
+        exclude_uid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return the events of ``user`` that overlap the given window."""
+
+    def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
+        """Return the applied entries after the given cursor."""
 
 
 class RaftReplica:
@@ -80,6 +101,29 @@ class RaftReplica:
     def snapshot(self) -> bytes:
         return self.state.snapshot()
 
+    def state_snapshot(self) -> Dict[str, Any]:
+        return json.loads(self.state.snapshot().decode("utf-8"))
+
+    def availability(
+        self,
+        users: Optional[List[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.state.availability(users, start, end)
+
+    def conflicts(
+        self,
+        user: str,
+        start: str,
+        end: str,
+        exclude_uid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.state.conflicts(user, start, end, exclude_uid)
+
+    def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
+        return self.state.sync(since, limit)
+
     def status(self) -> Dict[str, Any]:
         return self.node.status()
 
@@ -96,6 +140,8 @@ def start_raft_cluster(
     state_factory: Callable[[], ReplicatedState] = CalendarState,
     namespace: str = DEFAULT_NAMESPACE,
     membership: Optional[Iterable[str]] = None,
+    detached: bool = True,
+    get_if_exists: bool = True,
 ) -> Dict[str, Any]:
     """Start one actor per node and return ``node_id -> actor handle``.
 
@@ -103,6 +149,10 @@ def start_raft_cluster(
     replica set used to build each peer list. That allows a test or a rolling
     deployment to start a subset while the rest of the cluster knows about
     every member.
+
+    Detached actors outlive the process that created them, so the replicas
+    keep serving when an API process dies. ``get_if_exists`` lets a second
+    API process attach to the replicas that already exist.
     """
     if ray is None or RaftActor is None:
         raise RuntimeError("raft: ray is not installed")
@@ -111,11 +161,14 @@ def start_raft_cluster(
     actors: Dict[str, Any] = {}
     for node_id in started:
         peers = [other for other in members if other != node_id]
-        actors[node_id] = RaftActor.options(
-            name=actor_name(node_id),
-            namespace=namespace,
-            get_if_exists=False,
-        ).remote(
+        options: Dict[str, Any] = {
+            "name": actor_name(node_id),
+            "namespace": namespace,
+            "get_if_exists": get_if_exists,
+        }
+        if detached:
+            options["lifetime"] = "detached"
+        actors[node_id] = RaftActor.options(**options).remote(
             node_id,
             peers,
             db_paths[node_id],

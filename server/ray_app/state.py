@@ -6,7 +6,7 @@ the calendar domain.
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from pkg.protocol.canonical import canonical_bytes
 
@@ -37,3 +37,23 @@ class CalendarState:
         self.fsm = CalendarFSM.from_snapshot(
             json.loads(data.decode("utf-8"))
         )
+
+    def availability(
+        self,
+        users: Optional[List[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.fsm.availability(users, start, end)
+
+    def conflicts(
+        self,
+        user: str,
+        start: str,
+        end: str,
+        exclude_uid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.fsm.conflicts(user, start, end, exclude_uid)
+
+    def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
+        return self.fsm.sync(since, limit)

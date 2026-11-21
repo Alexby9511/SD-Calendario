@@ -127,3 +127,33 @@ def test_cluster_refuses_to_commit_without_quorum(ticking_cluster):
     except Exception:
         outcome = None
     assert outcome is None
+
+
+def test_api_commits_through_the_raft_cluster(ticking_cluster):
+    from fastapi.testclient import TestClient
+
+    from server.ray_app import api
+
+    cluster, actors = ticking_cluster
+    api.set_cluster(cluster)
+    try:
+        assert wait_for_leader(cluster) is not None
+        client = TestClient(api.app)
+
+        response = client.post(
+            "/v1/commands", json=request_command(51, "Desde la API")
+        )
+        assert response.status_code == 200
+        assert response.json()["code"] == 200
+
+        status = client.get("/v1/status").json()
+        assert status["leader_id"] is not None
+        assert len(status["replicas"]) == 5
+
+        event = client.get(
+            "/v1/kv/alice:01J00000000000000000000051"
+        ).json()
+        assert event["found"] is True
+        assert event["value"]["state"] == "CONFIRMED"
+    finally:
+        api.set_cluster(None)
