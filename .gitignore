@@ -17,3 +17,6 @@ client/build/bin/
 *.db
 *.db-shm
 *.db-wal
+
+# Local agent instructions
+/AGENTS.md
