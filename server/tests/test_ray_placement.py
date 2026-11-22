@@ -10,14 +10,17 @@ from server.ray_app.raft_actor import start_raft_cluster, stop_raft_cluster
 from server.ray_app.raft_cluster import RaftCluster
 from server.ray_app.raft_placement import (
     PLACEMENT_STRICT,
-    head_node_id,
+    head_placement_key,
+    parse_placement_key,
     plan_node_placement,
 )
 from server.ray_app.raft_supervisor import start_supervisor, stop_supervisor
-from server.ray_app.raft_ticker import (
-    DEFAULT_TICKER_PREFIX,
-    start_tickers,
-)
+from server.ray_app.raft_ticker import DEFAULT_TICKER_PREFIX, start_tickers
+
+HEAD_RESOURCES = {"sdcal-node-head": 1.0}
+WORKER_RESOURCES = {
+    f"sdcal-node-{index}": 1.0 for index in range(1, 5)
+}
 
 
 @pytest.fixture(scope="module")
@@ -27,13 +30,15 @@ def multi_node_ray():
 
     cluster = Cluster(
         initialize_head=True,
-        head_node_args={"num_cpus": 1},
+        head_node_args={"num_cpus": 1, "resources": HEAD_RESOURCES},
     )
     try:
-        for _ in range(4):
-            cluster.add_node(num_cpus=1)
+        for index in range(1, 5):
+            cluster.add_node(
+                num_cpus=1, resources={f"sdcal-node-{index}": 1.0}
+            )
         ray.init(address=cluster.address, ignore_reinit_error=True)
-        yield
+        yield cluster
     finally:
         if ray.is_initialized():
             ray.shutdown()
@@ -57,7 +62,7 @@ def request_command():
     }
 
 
-def wait_until(predicate, timeout: float = 20.0) -> bool:
+def wait_until(predicate, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -66,11 +71,18 @@ def wait_until(predicate, timeout: float = 20.0) -> bool:
     return False
 
 
-def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
-    multi_node_ray, tmp_path
-):
-    namespace = f"sdcal-test-{uuid.uuid4().hex}"
-    node_ids = [f"n{index}" for index in range(5)]
+def node_id_of(key: str, nodes=None) -> str:
+    """Return the Ray node that currently owns a placement target."""
+    kind, value = parse_placement_key(key)
+    for info in nodes if nodes is not None else ray.nodes():
+        if kind == "node" and info["NodeID"] == value:
+            return info["NodeID"]
+        if kind == "resource" and value in info.get("Resources", {}):
+            return info["NodeID"]
+    return ""
+
+
+def start_supervised_cluster(namespace, tmp_path, node_ids):
     db_paths = {
         node_id: str(tmp_path / f"{node_id}.db") for node_id in node_ids
     }
@@ -89,12 +101,36 @@ def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
         namespace=namespace,
         interval=0.1,
         node_assignments=assignments,
-        supervisor_node_id=head_node_id(ray.nodes()),
+        supervisor_node_id=head_placement_key(ray.nodes()),
     )
     tickers = start_tickers(
         actors,
         namespace=namespace,
         node_assignments=assignments,
+    )
+    return actors, supervisor, tickers, assignments
+
+
+def stop_cluster(namespace, node_ids, actors, supervisor):
+    stop_supervisor(supervisor)
+    for node_id in node_ids:
+        try:
+            ticker = ray.get_actor(
+                f"{DEFAULT_TICKER_PREFIX}{node_id}", namespace=namespace
+            )
+            ray.kill(ticker)
+        except Exception:
+            pass
+    stop_raft_cluster(actors)
+
+
+def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
+    multi_node_ray, tmp_path
+):
+    namespace = f"sdcal-test-{uuid.uuid4().hex}"
+    node_ids = [f"n{index}" for index in range(5)]
+    actors, supervisor, tickers, assignments = start_supervised_cluster(
+        namespace, tmp_path, node_ids
     )
     raft = RaftCluster(actors, namespace=namespace)
     try:
@@ -102,14 +138,21 @@ def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
         assert len(statuses) == 5
         assert len({status["ray_node_id"] for status in statuses.values()}) == 5
         for node_id in node_ids:
-            assert statuses[node_id]["ray_node_id"] == assignments[node_id]
+            assert statuses[node_id]["ray_node_id"] == node_id_of(
+                assignments[node_id]
+            )
 
         ticker_nodes = {
             node_id: ray.get(ticker.node_id.remote())
             for node_id, ticker in tickers.items()
         }
-        assert ticker_nodes == assignments
-        assert ray.get(supervisor.node_id.remote()) == head_node_id(ray.nodes())
+        assert ticker_nodes == {
+            node_id: node_id_of(assignments[node_id])
+            for node_id in node_ids
+        }
+        assert ray.get(supervisor.node_id.remote()) == node_id_of(
+            head_placement_key(ray.nodes())
+        )
 
         ray.kill(tickers["n1"])
 
@@ -120,7 +163,7 @@ def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
                 )
                 return (
                     ray.get(ticker.node_id.remote(), timeout=1.0)
-                    == assignments["n1"]
+                    == node_id_of(assignments["n1"])
                 )
             except Exception:
                 return False
@@ -135,7 +178,7 @@ def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
         )
 
         victim = "n2"
-        target_node = assignments[victim]
+        target_node = node_id_of(assignments[victim])
         assert (tmp_path / f"{victim}.db").exists()
         ray.kill(actors[victim])
 
@@ -148,13 +191,50 @@ def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
         assert recreated["last_log_index"] == 1
         assert (tmp_path / f"{victim}.db").exists()
     finally:
-        stop_supervisor(supervisor)
-        for node_id in node_ids:
-            try:
-                ticker = ray.get_actor(
-                    f"{DEFAULT_TICKER_PREFIX}{node_id}", namespace=namespace
-                )
-                ray.kill(ticker)
-            except Exception:
-                pass
-        stop_raft_cluster(actors)
+        stop_cluster(namespace, node_ids, actors, supervisor)
+
+
+def test_replica_follows_its_node_when_the_node_rejoins(
+    multi_node_ray, tmp_path
+):
+    namespace = f"sdcal-test-{uuid.uuid4().hex}"
+    node_ids = [f"n{index}" for index in range(5)]
+    actors, supervisor, tickers, assignments = start_supervised_cluster(
+        namespace, tmp_path, node_ids
+    )
+    raft = RaftCluster(actors, namespace=namespace)
+    try:
+        assert wait_until(lambda: raft.leader() is not None)
+        assert raft.propose(request_command())["code"] == 200
+
+        victim = "n1"
+        target = assignments[victim]
+        resource = parse_placement_key(target)[1]
+        old_node = node_id_of(target)
+
+        node = next(
+            item
+            for item in multi_node_ray.list_all_nodes()
+            if item.node_id == old_node
+        )
+        multi_node_ray.remove_node(node)
+        assert wait_until(lambda: node_id_of(target) == "")
+
+        multi_node_ray.add_node(
+            num_cpus=1, resources={resource: 1.0}
+        )
+        assert wait_until(lambda: node_id_of(target) != "")
+        new_node = node_id_of(target)
+        assert new_node != old_node
+
+        def replica_recovered():
+            status = raft.statuses().get(victim)
+            return (
+                status is not None
+                and status["ray_node_id"] == new_node
+                and status["last_log_index"] == 1
+            )
+
+        assert wait_until(replica_recovered)
+    finally:
+        stop_cluster(namespace, node_ids, actors, supervisor)

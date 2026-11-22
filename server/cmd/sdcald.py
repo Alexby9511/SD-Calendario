@@ -22,7 +22,7 @@ def start_raft_cluster(
     from server.ray_app.logging_config import get_logger
     from server.ray_app.raft_actor import start_raft_cluster as start_replicas
     from server.ray_app.raft_cluster import RaftCluster
-    from server.ray_app.raft_placement import head_node_id, plan_node_placement
+    from server.ray_app.raft_placement import head_placement_key, plan_node_placement
     from server.ray_app.raft_supervisor import start_supervisor
     from server.ray_app.raft_ticker import start_tickers
 
@@ -68,7 +68,7 @@ def start_raft_cluster(
         db_paths,
         namespace=namespace,
         node_assignments=node_assignments,
-        supervisor_node_id=head_node_id(),
+        supervisor_node_id=head_placement_key(),
     )
     set_cluster(RaftCluster(actors, namespace=namespace))
 

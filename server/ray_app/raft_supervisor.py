@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .logging_config import get_logger
 from .raft_actor import RaftActor
-from .raft_placement import strict_node_affinity
+from .raft_placement import placement_options, placement_target_alive
 from .raft_ticker import (
     DEFAULT_TICK_INTERVAL,
     DEFAULT_TICKER_PREFIX,
@@ -110,14 +110,9 @@ class _SupervisorReplica:
 
     def _node_is_alive(self, node_id: str) -> bool:
         try:
-            nodes = ray.nodes()
+            return placement_target_alive(node_id)
         except Exception:
             return False
-        return any(
-            info.get("NodeID") == node_id
-            and info.get("Alive", info.get("alive", False))
-            for info in nodes
-        )
 
     def _recreate(self, node_id: str) -> bool:
         peers = [other for other in self.node_ids if other != node_id]
@@ -137,7 +132,7 @@ class _SupervisorReplica:
             "get_if_exists": False,
         }
         if target_node:
-            options["scheduling_strategy"] = strict_node_affinity(target_node)
+            options.update(placement_options(target_node))
         try:
             RaftActor.options(**options).remote(
                 node_id,
@@ -182,7 +177,7 @@ class _SupervisorReplica:
             "get_if_exists": True,
         }
         if target_node:
-            options["scheduling_strategy"] = strict_node_affinity(target_node)
+            options.update(placement_options(target_node))
         try:
             ticker = TickerActor.options(**options).remote(
                 node_id, self.namespace, self.ticker_interval
@@ -225,7 +220,7 @@ def start_supervisor(
         "get_if_exists": True,
     }
     if supervisor_node_id:
-        options["scheduling_strategy"] = strict_node_affinity(supervisor_node_id)
+        options.update(placement_options(supervisor_node_id))
     supervisor = SupervisorActor.options(**options).remote(
         list(node_ids),
         dict(db_paths),

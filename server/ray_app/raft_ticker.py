@@ -14,7 +14,7 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from .logging_config import get_logger
-from .raft_placement import strict_node_affinity
+from .raft_placement import placement_options
 from .raft_transport import DEFAULT_NAMESPACE, actor_name
 
 try:
@@ -98,7 +98,7 @@ def start_tickers(
         }
         target_node = assignments.get(node_id)
         if target_node:
-            options["scheduling_strategy"] = strict_node_affinity(target_node)
+            options.update(placement_options(target_node))
         ticker = TickerActor.options(**options).remote(
             node_id, namespace, interval
         )

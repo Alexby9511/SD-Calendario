@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Tupl
 from .consensus.clock import RealClock
 from .consensus.node import RaftNode
 from .consensus.storage import SQLiteStorage
-from .raft_placement import strict_node_affinity
+from .raft_placement import placement_options
 from .raft_transport import DEFAULT_NAMESPACE, RayTransport, actor_name
 from .state import CalendarState
 
@@ -189,7 +189,7 @@ def start_raft_cluster(
             options["lifetime"] = "detached"
         target_node = assignments.get(node_id)
         if target_node:
-            options["scheduling_strategy"] = strict_node_affinity(target_node)
+            options.update(placement_options(target_node))
         actors[node_id] = RaftActor.options(**options).remote(
             node_id,
             peers,
