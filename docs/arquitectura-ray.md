@@ -39,3 +39,12 @@ avanza un cursor solo después de aplicar una página contigua.
 Este diseño no ofrece linealizabilidad completa ante particiones ni tolerancia
 robusta a reinicios del actor. Si el coordinador muere, debe crearse otro actor
 desde un snapshot persistido. El actor no debe considerarse durable por sí solo.
+
+## Estado de implementación
+
+El prototipo ya no usa un único `CoordinatorState` en memoria: el consenso se
+implementa a mano en `server/ray_app/consensus/` sobre cinco actores Ray, con
+SQLite por réplica, pre-vote, snapshots, supervisor de réplicas y tickers, y
+placement estricto de una réplica por nodo. Las secciones anteriores describen
+el diseño original de Fase 1 y quedan como referencia histórica; la fuente de
+verdad actual es el código y `server/tests/`.
