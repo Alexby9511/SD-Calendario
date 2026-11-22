@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: sd-calendario-ray
+Version: 0.1.0
+Summary: Calendario distribuido prototipo con Ray
+Requires-Python: >=3.10
+Requires-Dist: ray[client]>=2.9
+Requires-Dist: fastapi>=0.110
+Requires-Dist: uvicorn>=0.27
+Requires-Dist: cryptography>=42
+Provides-Extra: test
+Requires-Dist: pytest>=8; extra == "test"
+Requires-Dist: httpx>=0.27; extra == "test"

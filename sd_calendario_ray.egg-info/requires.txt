@@ -1,0 +1,8 @@
+ray[client]>=2.9
+fastapi>=0.110
+uvicorn>=0.27
+cryptography>=42
+
+[test]
+pytest>=8
+httpx>=0.27
