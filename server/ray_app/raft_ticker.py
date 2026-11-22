@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 
 from .logging_config import get_logger
 from .raft_placement import placement_options
+from .raft_startup import create_named_actor
 from .raft_transport import DEFAULT_NAMESPACE, actor_name
 
 try:
@@ -90,20 +91,20 @@ def start_tickers(
     tickers: Dict[str, Any] = {}
     assignments = dict(node_assignments or {})
     for node_id in node_ids:
-        options: Dict[str, Any] = {
-            "name": f"{prefix}{node_id}",
-            "namespace": namespace,
-            "lifetime": "detached",
-            "get_if_exists": True,
-        }
+        options: Dict[str, Any] = {"lifetime": "detached"}
         target_node = assignments.get(node_id)
         if target_node:
             options.update(placement_options(target_node))
-        ticker = TickerActor.options(**options).remote(
-            node_id, namespace, interval
+        tickers[node_id] = create_named_actor(
+            TickerActor,
+            node_id,
+            namespace,
+            interval,
+            name=f"{prefix}{node_id}",
+            namespace=namespace,
+            start_method="run",
+            **options,
         )
-        ticker.run.remote()
-        tickers[node_id] = ticker
     return tickers
 
 

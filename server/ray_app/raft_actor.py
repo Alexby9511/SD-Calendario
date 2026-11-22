@@ -14,6 +14,7 @@ from .consensus.clock import RealClock
 from .consensus.node import RaftNode
 from .consensus.storage import SQLiteStorage
 from .raft_placement import placement_options
+from .raft_startup import create_named_actor
 from .raft_transport import DEFAULT_NAMESPACE, RayTransport, actor_name
 from .state import CalendarState
 
@@ -195,16 +196,13 @@ def start_raft_cluster(
         if skip_unassigned and not target_node:
             continue
         peers = [other for other in members if other != node_id]
-        options: Dict[str, Any] = {
-            "name": actor_name(node_id),
-            "namespace": namespace,
-            "get_if_exists": get_if_exists,
-        }
+        options: Dict[str, Any] = {"get_if_exists": get_if_exists}
         if detached:
             options["lifetime"] = "detached"
         if target_node:
             options.update(placement_options(target_node))
-        actors[node_id] = RaftActor.options(**options).remote(
+        actors[node_id] = create_named_actor(
+            RaftActor,
             node_id,
             peers,
             db_paths[node_id],
@@ -214,6 +212,11 @@ def start_raft_cluster(
             DEFAULT_ELECTION_TIMEOUT,
             DEFAULT_HEARTBEAT_INTERVAL,
             target_node,
+            name=actor_name(node_id),
+            namespace=namespace,
+            start_method="status",
+            wait_for_start=True,
+            **options,
         )
     if actors:
         # Wait for every constructor to finish before the caller starts

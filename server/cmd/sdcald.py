@@ -1,9 +1,61 @@
 import argparse
+import time
 from pathlib import Path
 
 import uvicorn
 
-from server.ray_app.raft_placement import PLACEMENT_MODES
+from server.ray_app.logging_config import get_logger
+from server.ray_app.raft_placement import PLACEMENT_MODES, alive_node_count
+
+
+def connect_ray(address, attempts: int = 5) -> None:
+    """Connect to the Ray cluster, retrying transient client-server races.
+
+    The head exposes a single Ray Client port. When several APIs connect at
+    the same instant, the per-connection proxy can fail to start on its
+    allocated port; a short retry lets the proxy assign another one.
+    """
+    import ray
+
+    logger = get_logger("raft.startup")
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            ray.init(address=address, ignore_reinit_error=True)
+            return
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "ray connection failed attempt=%d/%d reason=%r",
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt == attempts:
+                break
+            try:
+                if ray.is_initialized():
+                    ray.shutdown()
+            except Exception:
+                pass
+            time.sleep(min(attempt, 3))
+    raise RuntimeError("ray: could not connect to the cluster") from last_error
+
+
+def _wait_for_nodes(count: int, logger, timeout: float = 60.0) -> bool:
+    """Wait until the Ray cluster has enough alive nodes to place the replicas."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        alive = alive_node_count()
+        if alive >= count:
+            return True
+        time.sleep(0.5)
+    logger.warning(
+        "timed out waiting for Ray nodes alive=%d expected=%d",
+        alive_node_count(),
+        count,
+    )
+    return False
 
 
 def start_raft_cluster(
@@ -38,6 +90,8 @@ def start_raft_cluster(
     logger = get_logger("raft.placement")
     skip_unassigned = False
     try:
+        if placement_mode == "strict" and replicas > 1:
+            _wait_for_nodes(replicas, logger)
         node_assignments = plan_node_placement(node_ids, placement_mode)
     except PlacementError as exc:
         # The cluster is already running but some nodes are down: attach to
@@ -119,9 +173,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.no_ray:
-        import ray
-
-        ray.init(address=args.ray_address, ignore_reinit_error=True)
+        connect_ray(args.ray_address)
         if args.raft_replicas > 0:
             start_raft_cluster(
                 args.raft_replicas,

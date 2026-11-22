@@ -112,6 +112,13 @@ def placement_target_alive(
     return any(_has_resource(info, value) for info in nodes)
 
 
+def alive_node_count(
+    node_info: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> int:
+    """Return the number of alive Ray nodes."""
+    return len(_alive_nodes(node_info))
+
+
 def head_placement_key(
     node_info: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Optional[str]:

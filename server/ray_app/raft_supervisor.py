@@ -19,6 +19,7 @@ from .raft_actor import (
     RaftActor,
 )
 from .raft_placement import placement_options, placement_target_alive
+from .raft_startup import create_named_actor
 from .raft_ticker import (
     DEFAULT_TICK_INTERVAL,
     DEFAULT_TICKER_PREFIX,
@@ -187,23 +188,24 @@ class _SupervisorReplica:
         """Recreate a missing ticker so the replica keeps its timers."""
         if self._ticker_is_alive(node_id):
             return False
-        target_node = self.node_assignments.get(node_id)
+        target_node = self._known_placements.get(node_id)
         if target_node and not self._node_is_alive(target_node):
             return False
 
-        options: Dict[str, Any] = {
-            "name": f"{self.ticker_prefix}{node_id}",
-            "namespace": self.namespace,
-            "lifetime": "detached",
-            "get_if_exists": True,
-        }
+        options: Dict[str, Any] = {"lifetime": "detached"}
         if target_node:
             options.update(placement_options(target_node))
         try:
-            ticker = TickerActor.options(**options).remote(
-                node_id, self.namespace, self.ticker_interval
+            create_named_actor(
+                TickerActor,
+                node_id,
+                self.namespace,
+                self.ticker_interval,
+                name=f"{self.ticker_prefix}{node_id}",
+                namespace=self.namespace,
+                start_method="run",
+                **options,
             )
-            ticker.run.remote()
         except Exception as exc:
             self.logger.warning(
                 "could not recreate ticker node_id=%s reason=%r", node_id, exc
@@ -234,15 +236,11 @@ def start_supervisor(
     """Start (or attach to) the detached supervisor of the replicas."""
     if ray is None or SupervisorActor is None:
         raise RuntimeError("raft: ray is not installed")
-    options: Dict[str, Any] = {
-        "name": name,
-        "namespace": namespace,
-        "lifetime": "detached",
-        "get_if_exists": True,
-    }
+    options: Dict[str, Any] = {"lifetime": "detached"}
     if supervisor_node_id:
         options.update(placement_options(supervisor_node_id))
-    supervisor = SupervisorActor.options(**options).remote(
+    return create_named_actor(
+        SupervisorActor,
         list(node_ids),
         dict(db_paths),
         namespace,
@@ -252,9 +250,11 @@ def start_supervisor(
         dict(node_assignments or {}),
         ticker_interval,
         ticker_prefix,
+        name=name,
+        namespace=namespace,
+        start_method="run",
+        **options,
     )
-    supervisor.run.remote()
-    return supervisor
 
 
 def stop_supervisor(supervisor: Any) -> None:
