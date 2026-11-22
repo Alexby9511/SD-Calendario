@@ -9,10 +9,12 @@ A ticker resolves its replica by name on every round, so it follows a replica
 that the supervisor recreated after a crash.
 """
 
+import threading
 import time
-from typing import Any, Dict, Iterable, List, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 from .logging_config import get_logger
+from .raft_placement import strict_node_affinity
 from .raft_transport import DEFAULT_NAMESPACE, actor_name
 
 try:
@@ -29,17 +31,33 @@ class _TickerReplica:
     """Plain implementation of the ticker loop."""
 
     def __init__(self, node_id: str, namespace: str, interval: float) -> None:
-        self.node_id = node_id
+        self.replica_id = node_id
         self.namespace = namespace
         self.interval = interval
         self.logger = get_logger("raft.ticker")
+        self._thread: Optional[threading.Thread] = None
+
+    def node_id(self) -> str:
+        """Return the physical Ray node where this ticker runs."""
+        return ray.get_runtime_context().get_node_id()
 
     def run(self) -> None:
+        """Start the tick loop in a daemon thread and return immediately.
+
+        The actor must stay responsive: a blocking loop would queue every
+        later method call (including ``node_id``) behind it forever.
+        """
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
         while True:
             time.sleep(self.interval)
             try:
                 actor = ray.get_actor(
-                    actor_name(self.node_id), namespace=self.namespace
+                    actor_name(self.replica_id), namespace=self.namespace
                 )
                 # No timeout: the next tick is only issued once the previous
                 # one finished, so a slow replica never queues pending ticks.
@@ -47,7 +65,7 @@ class _TickerReplica:
             except Exception as exc:
                 # A dead or busy replica must not stop the ticker.
                 self.logger.debug(
-                    "tick skipped node_id=%s reason=%r", self.node_id, exc
+                    "tick skipped node_id=%s reason=%r", self.replica_id, exc
                 )
                 continue
 
@@ -60,6 +78,7 @@ def start_tickers(
     interval: float = DEFAULT_TICK_INTERVAL,
     namespace: str = DEFAULT_NAMESPACE,
     prefix: str = DEFAULT_TICKER_PREFIX,
+    node_assignments: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Start one detached ticker actor per replica."""
     if ray is None or TickerActor is None:
@@ -69,13 +88,20 @@ def start_tickers(
     else:
         node_ids = list(replicas)
     tickers: Dict[str, Any] = {}
+    assignments = dict(node_assignments or {})
     for node_id in node_ids:
-        ticker = TickerActor.options(
-            name=f"{prefix}{node_id}",
-            namespace=namespace,
-            lifetime="detached",
-            get_if_exists=False,
-        ).remote(node_id, namespace, interval)
+        options: Dict[str, Any] = {
+            "name": f"{prefix}{node_id}",
+            "namespace": namespace,
+            "lifetime": "detached",
+            "get_if_exists": False,
+        }
+        target_node = assignments.get(node_id)
+        if target_node:
+            options["scheduling_strategy"] = strict_node_affinity(target_node)
+        ticker = TickerActor.options(**options).remote(
+            node_id, namespace, interval
+        )
         ticker.run.remote()
         tickers[node_id] = ticker
     return tickers

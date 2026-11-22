@@ -85,6 +85,7 @@ def test_supervisor_recreates_a_killed_replica(supervised_cluster):
     assert wait_until(lambda: victim in cluster.statuses())
     assert wait_until(
         lambda: cluster.statuses().get(victim, {}).get("role") == "follower"
+        and cluster.statuses().get(victim, {}).get("leader_id") == leader_id
     )
 
     statuses = cluster.statuses()

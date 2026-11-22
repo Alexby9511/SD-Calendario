@@ -2,14 +2,18 @@
 
 The supervisor is a detached Ray actor: it keeps running when an API process
 dies. A recreated replica reloads its term, vote, log and snapshot from its
-own SQLite database and rejoins the cluster as a follower.
+own SQLite database and rejoins the cluster as a follower. If strict node
+placement is configured, recreation keeps the actor on the same Ray node and
+waits when that node is unavailable.
 """
 
+import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .logging_config import get_logger
 from .raft_actor import RaftActor
+from .raft_placement import strict_node_affinity
 from .raft_transport import DEFAULT_NAMESPACE, actor_name
 from .state import CalendarState
 
@@ -35,6 +39,7 @@ class _SupervisorReplica:
         state_factory: Callable[[], Any],
         interval: float,
         timeout: float,
+        node_assignments: Dict[str, str],
     ) -> None:
         self.node_ids = list(node_ids)
         self.db_paths = dict(db_paths)
@@ -42,13 +47,28 @@ class _SupervisorReplica:
         self.state_factory = state_factory
         self.interval = interval
         self.timeout = timeout
+        self.node_assignments = dict(node_assignments)
         self._started = False
+        self._thread: Optional[threading.Thread] = None
         self.logger = get_logger("raft.supervisor")
 
+    def node_id(self) -> str:
+        """Return the physical Ray node where the supervisor runs."""
+        return ray.get_runtime_context().get_node_id()
+
     def run(self) -> None:
+        """Start the supervision loop in a daemon thread and return.
+
+        A blocking actor method would make the supervisor unreachable for
+        inspection and would prevent a second caller from attaching to it.
+        """
         if self._started:
             return
         self._started = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
         while True:
             try:
                 self.check()
@@ -79,15 +99,38 @@ class _SupervisorReplica:
             return False
         return True
 
+    def _node_is_alive(self, node_id: str) -> bool:
+        try:
+            nodes = ray.nodes()
+        except Exception:
+            return False
+        return any(
+            info.get("NodeID") == node_id
+            and info.get("Alive", info.get("alive", False))
+            for info in nodes
+        )
+
     def _recreate(self, node_id: str) -> bool:
         peers = [other for other in self.node_ids if other != node_id]
+        target_node = self.node_assignments.get(node_id)
+        if target_node and not self._node_is_alive(target_node):
+            self.logger.debug(
+                "replica waits for its Ray node node_id=%s target_node_id=%s",
+                node_id,
+                target_node,
+            )
+            return False
+
+        options: Dict[str, Any] = {
+            "name": actor_name(node_id),
+            "namespace": self.namespace,
+            "lifetime": "detached",
+            "get_if_exists": False,
+        }
+        if target_node:
+            options["scheduling_strategy"] = strict_node_affinity(target_node)
         try:
-            RaftActor.options(
-                name=actor_name(node_id),
-                namespace=self.namespace,
-                lifetime="detached",
-                get_if_exists=False,
-            ).remote(
+            RaftActor.options(**options).remote(
                 node_id,
                 peers,
                 self.db_paths[node_id],
@@ -116,22 +159,28 @@ def start_supervisor(
     interval: float = DEFAULT_CHECK_INTERVAL,
     timeout: float = DEFAULT_CHECK_TIMEOUT,
     name: str = DEFAULT_SUPERVISOR_NAME,
+    node_assignments: Optional[Dict[str, str]] = None,
+    supervisor_node_id: Optional[str] = None,
 ) -> Any:
     """Start (or attach to) the detached supervisor of the replicas."""
     if ray is None or SupervisorActor is None:
         raise RuntimeError("raft: ray is not installed")
-    supervisor = SupervisorActor.options(
-        name=name,
-        namespace=namespace,
-        lifetime="detached",
-        get_if_exists=True,
-    ).remote(
+    options: Dict[str, Any] = {
+        "name": name,
+        "namespace": namespace,
+        "lifetime": "detached",
+        "get_if_exists": True,
+    }
+    if supervisor_node_id:
+        options["scheduling_strategy"] = strict_node_affinity(supervisor_node_id)
+    supervisor = SupervisorActor.options(**options).remote(
         list(node_ids),
         dict(db_paths),
         namespace,
         state_factory,
         interval,
         timeout,
+        dict(node_assignments or {}),
     )
     supervisor.run.remote()
     return supervisor

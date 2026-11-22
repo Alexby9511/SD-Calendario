@@ -54,28 +54,55 @@ class RayTransport:
         self.failure_cooldown = failure_cooldown
         self._failures: Dict[str, int] = {}
         self._blocked_until: Dict[str, float] = {}
+        self._actor_ids: Dict[str, str] = {}
 
     def send(self, source: str, target: str, message: Any) -> Any:
         """Deliver ``message`` to the target actor and wait for its reply."""
         now = time.monotonic()
-        if self._blocked_until.get(target, 0.0) > now:
-            raise TransportError(f"raft: target {target} is marked as down")
         try:
             actor = ray.get_actor(
                 actor_name(target, self.actor_prefix),
                 namespace=self.namespace,
-            )
-            reply = ray.get(
-                actor.handle_message.remote(message),
-                timeout=self.timeout,
             )
         except Exception as exc:
             self._register_failure(target, now)
             raise TransportError(
                 f"raft: message from {source} to {target} dropped: {exc!r}"
             ) from exc
+
+        actor_id = self._actor_identity(actor)
+        if self._blocked_until.get(target, 0.0) > now:
+            previous_actor_id = self._actor_ids.get(target)
+            if previous_actor_id is None or actor_id != previous_actor_id:
+                # The target was recreated after being marked as down. Its new
+                # identity proves that it is safe to retry immediately.
+                self._failures.pop(target, None)
+                self._blocked_until.pop(target, None)
+            else:
+                raise TransportError(f"raft: target {target} is marked as down")
+
+        try:
+            reply = ray.get(
+                actor.handle_message.remote(message),
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            self._actor_ids[target] = actor_id
+            self._register_failure(target, now)
+            raise TransportError(
+                f"raft: message from {source} to {target} dropped: {exc!r}"
+            ) from exc
         self._failures.pop(target, None)
+        self._blocked_until.pop(target, None)
+        self._actor_ids[target] = actor_id
         return reply
+
+    @staticmethod
+    def _actor_identity(actor: Any) -> str:
+        actor_id = getattr(actor, "_actor_id", None)
+        if actor_id is not None:
+            return str(actor_id)
+        return repr(actor)
 
     def _register_failure(self, target: str, now: float) -> None:
         failures = self._failures.get(target, 0) + 1
@@ -89,3 +116,4 @@ class RayTransport:
         """Forget the failures recorded for ``target``."""
         self._failures.pop(target, None)
         self._blocked_until.pop(target, None)
+        self._actor_ids.pop(target, None)

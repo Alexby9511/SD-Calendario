@@ -10,6 +10,12 @@ from server.ray_app.raft_actor import start_raft_cluster, stop_raft_cluster
 from server.ray_app.raft_transport import RayTransport, actor_name
 
 
+@ray.remote
+class EchoActor:
+    def handle_message(self, message):
+        return message
+
+
 def request_command(index: int, title: str):
     token = f"01J000000000000000000000{index:02d}"
     return {
@@ -64,6 +70,27 @@ def test_ray_transport_reports_missing_actor(ray_runtime):
     )
     with pytest.raises(TransportError):
         transport.send("n0", "n1", {"ping": True})
+
+
+def test_ray_transport_unblocks_when_named_actor_reappears(ray_runtime):
+    namespace = f"sdcal-reappear-{uuid.uuid4().hex}"
+    transport = RayTransport(
+        namespace=namespace,
+        timeout=2.0,
+        failure_threshold=1,
+        failure_cooldown=60.0,
+    )
+    target = "transport-reappear"
+    with pytest.raises(TransportError):
+        transport.send("n0", target, {"ping": True})
+
+    actor = EchoActor.options(
+        name=actor_name(target), namespace=namespace
+    ).remote()
+    try:
+        assert transport.send("n0", target, {"ping": True}) == {"ping": True}
+    finally:
+        ray.kill(actor)
 
 
 def test_ray_cluster_elects_leader_and_commits(cluster):

@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Tupl
 from .consensus.clock import RealClock
 from .consensus.node import RaftNode
 from .consensus.storage import SQLiteStorage
+from .raft_placement import strict_node_affinity
 from .raft_transport import DEFAULT_NAMESPACE, RayTransport, actor_name
 from .state import CalendarState
 
@@ -129,7 +130,10 @@ class RaftReplica:
         return self.state.sync(since, limit)
 
     def status(self) -> Dict[str, Any]:
-        return self.node.status()
+        status = self.node.status()
+        if ray is not None:
+            status["ray_node_id"] = ray.get_runtime_context().get_node_id()
+        return status
 
     def close(self) -> None:
         self.storage.close()
@@ -146,6 +150,7 @@ def start_raft_cluster(
     membership: Optional[Iterable[str]] = None,
     detached: bool = True,
     get_if_exists: bool = True,
+    node_assignments: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Start one actor per node and return ``node_id -> actor handle``.
 
@@ -156,12 +161,22 @@ def start_raft_cluster(
 
     Detached actors outlive the process that created them, so the replicas
     keep serving when an API process dies. ``get_if_exists`` lets a second
-    API process attach to the replicas that already exist.
+    API process attach to the replicas that already exist. When
+    ``node_assignments`` is provided, each actor is pinned to its assigned
+    Ray node so that its SQLite database remains node-local.
     """
     if ray is None or RaftActor is None:
         raise RuntimeError("raft: ray is not installed")
     started = list(node_ids)
     members = list(membership) if membership is not None else started
+    assignments = dict(node_assignments or {})
+    targets = [
+        assignments[node_id]
+        for node_id in started
+        if assignments.get(node_id)
+    ]
+    if len(set(targets)) != len(targets):
+        raise ValueError("raft: replica placement requires distinct Ray nodes")
     actors: Dict[str, Any] = {}
     for node_id in started:
         peers = [other for other in members if other != node_id]
@@ -172,6 +187,9 @@ def start_raft_cluster(
         }
         if detached:
             options["lifetime"] = "detached"
+        target_node = assignments.get(node_id)
+        if target_node:
+            options["scheduling_strategy"] = strict_node_affinity(target_node)
         actors[node_id] = RaftActor.options(**options).remote(
             node_id,
             peers,

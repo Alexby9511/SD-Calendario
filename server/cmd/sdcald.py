@@ -3,11 +3,14 @@ from pathlib import Path
 
 import uvicorn
 
+from server.ray_app.raft_placement import PLACEMENT_MODES
+
 
 def start_raft_cluster(
     replicas: int,
     data_dir: str,
     namespace: str,
+    placement_mode: str = "auto",
 ) -> None:
     """Start (or attach to) the Raft replicas and wire them into the API.
 
@@ -16,19 +19,57 @@ def start_raft_cluster(
     cluster.
     """
     from server.ray_app.api import set_cluster
+    from server.ray_app.logging_config import get_logger
     from server.ray_app.raft_actor import start_raft_cluster as start_replicas
     from server.ray_app.raft_cluster import RaftCluster
+    from server.ray_app.raft_placement import head_node_id, plan_node_placement
     from server.ray_app.raft_supervisor import start_supervisor
     from server.ray_app.raft_ticker import start_tickers
 
     node_ids = [f"n{index}" for index in range(replicas)]
-    base = Path(data_dir)
+    base = Path(data_dir).expanduser().resolve()
     db_paths = {
         node_id: str(base / f"{node_id}.db") for node_id in node_ids
     }
-    actors = start_replicas(node_ids, db_paths, namespace=namespace)
-    start_tickers(actors, namespace=namespace)
-    start_supervisor(node_ids, db_paths, namespace=namespace)
+    node_assignments = plan_node_placement(node_ids, placement_mode)
+    logger = get_logger("raft.placement")
+    if node_assignments:
+        logger.info(
+            "strict replica placement planned replicas=%d assignments=%s",
+            replicas,
+            node_assignments,
+        )
+    elif placement_mode == "auto" and replicas > 1:
+        logger.warning(
+            "not enough Ray nodes for strict placement; "
+            "using default placement replicas=%d",
+            replicas,
+        )
+    else:
+        logger.info(
+            "default replica placement selected replicas=%d mode=%s",
+            replicas,
+            placement_mode,
+        )
+
+    actors = start_replicas(
+        node_ids,
+        db_paths,
+        namespace=namespace,
+        node_assignments=node_assignments,
+    )
+    start_tickers(
+        actors,
+        namespace=namespace,
+        node_assignments=node_assignments,
+    )
+    start_supervisor(
+        node_ids,
+        db_paths,
+        namespace=namespace,
+        node_assignments=node_assignments,
+        supervisor_node_id=head_node_id(),
+    )
     set_cluster(RaftCluster(actors, namespace=namespace))
 
 
@@ -54,6 +95,12 @@ def main() -> None:
         default="sdcal",
         help="Ray namespace that holds the Raft actors",
     )
+    parser.add_argument(
+        "--raft-placement",
+        choices=PLACEMENT_MODES,
+        default="auto",
+        help="replica placement: strict one-per-node, auto, or off",
+    )
     args = parser.parse_args()
 
     if not args.no_ray:
@@ -65,6 +112,7 @@ def main() -> None:
                 args.raft_replicas,
                 args.raft_data_dir,
                 args.raft_namespace,
+                args.raft_placement,
             )
 
     from server.ray_app.api import app
