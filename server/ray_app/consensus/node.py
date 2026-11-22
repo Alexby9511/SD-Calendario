@@ -9,6 +9,7 @@ import random
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple
 
+from ..logging_config import get_logger
 from .clock import Clock, RealClock
 from .log import RaftLog
 from .messages import (
@@ -33,6 +34,15 @@ class Role(str, Enum):
     PRE_CANDIDATE = "pre_candidate"
     CANDIDATE = "candidate"
     LEADER = "leader"
+
+
+def _msg_id(command: Any) -> str:
+    """Return the command ``msg_id`` for logs, or ``"-"`` when absent."""
+    if isinstance(command, dict):
+        value = command.get("msg_id")
+        if value is not None:
+            return str(value)
+    return "-"
 
 
 class NotLeaderError(Exception):
@@ -102,6 +112,7 @@ class RaftNode:
         self._election_deadline = 0.0
         self._heartbeat_deadline = 0.0
         self._last_leader_contact: Optional[float] = None
+        self.logger = get_logger("raft.node")
         self._reset_election_deadline()
         if storage is not None:
             self._restore_stored_snapshot()
@@ -227,7 +238,21 @@ class RaftNode:
         self._replicate_all()
         self._advance_commit()
         if self.commit_index >= entry.index:
+            self.logger.debug(
+                "committed command node_id=%s index=%d term=%d msg_id=%s",
+                self.node_id,
+                entry.index,
+                entry.term,
+                _msg_id(entry.command),
+            )
             return self._results.get(entry.index)
+        self.logger.warning(
+            "command pending without quorum node_id=%s index=%d term=%d msg_id=%s",
+            self.node_id,
+            entry.index,
+            entry.term,
+            _msg_id(entry.command),
+        )
         return None
 
     def take_snapshot(self) -> bool:
@@ -253,6 +278,12 @@ class RaftNode:
         self._results = {
             key: value for key, value in self._results.items() if key > index
         }
+        self.logger.info(
+            "compacted snapshot node_id=%s index=%d term=%d",
+            self.node_id,
+            index,
+            term,
+        )
         return True
 
     def handle_message(self, message: Any) -> Any:
@@ -436,6 +467,12 @@ class RaftNode:
         self._snapshot_data = message.data
         self._results = {}
         self._persist_log()
+        self.logger.info(
+            "installed snapshot node_id=%s index=%d term=%d",
+            self.node_id,
+            message.last_included_index,
+            message.last_included_term,
+        )
         return InstallSnapshotResponse(self.current_term, True)
 
     def send_heartbeats(self) -> None:
@@ -558,6 +595,8 @@ class RaftNode:
         }
 
     def _become_follower(self, term: int) -> None:
+        previous_role = self.role
+        previous_term = self.current_term
         if term > self.current_term:
             self.current_term = term
             self.voted_for = None
@@ -568,6 +607,14 @@ class RaftNode:
         self._pre_votes = set()
         self._pre_vote_term = None
         self._reset_election_deadline()
+        if previous_role is not Role.FOLLOWER or term > previous_term:
+            self.logger.info(
+                "stepped down node_id=%s from_role=%s term=%d previous_term=%d",
+                self.node_id,
+                previous_role.value,
+                self.current_term,
+                previous_term,
+            )
 
     def _become_leader(self) -> None:
         self.role = Role.LEADER
@@ -578,6 +625,12 @@ class RaftNode:
         self._next_index = {peer: self.log.last_index + 1 for peer in self.peers}
         self._match_index = {peer: 0 for peer in self.peers}
         self._reset_heartbeat_deadline()
+        self.logger.info(
+            "became leader node_id=%s term=%d last_log_index=%d",
+            self.node_id,
+            self.current_term,
+            self.log.last_index,
+        )
         self.send_heartbeats()
 
     def _persist_meta(self) -> None:

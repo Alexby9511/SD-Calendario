@@ -6,12 +6,15 @@ remaining quorum, and check that the isolated leader can neither commit nor
 create a split brain when it rejoins.
 """
 
+import logging
 import random
+import re
 
 from server.ray_app.consensus.clock import FakeClock
 from server.ray_app.consensus.node import RaftNode, Role
 from server.ray_app.consensus.transport import InMemoryNetwork
 from server.ray_app.fsm import CalendarFSM
+from server.ray_app.logging_config import _formatter
 
 
 def cluster(size: int = 5):
@@ -130,3 +133,33 @@ def test_retried_msg_id_is_deduplicated_after_leader_change():
     for node_id in ("n1", "n2", "n3", "n4"):
         assert machines[node_id].applied_index == 1
         assert [event["msg_id"] for event in machines[node_id].log] == ["m1"]
+
+
+def test_raft_logs_carry_timestamp_component_and_msg_id(caplog):
+    clock, network, nodes, _ = cluster()
+    with caplog.at_level(logging.INFO, logger="sdcal.raft.node"):
+        elect_leader(clock, nodes)
+
+    record = next(
+        item
+        for item in caplog.records
+        if item.name == "sdcal.raft.node" and "became leader" in item.getMessage()
+    )
+    line = _formatter().format(record)
+    assert re.match(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+0000 INFO "
+        r"sdcal\.raft\.node became leader node_id=n0 term=1",
+        line,
+    )
+
+    isolate(network, "n0", nodes)
+    with caplog.at_level(logging.WARNING, logger="sdcal.raft.node"):
+        assert nodes["n0"].propose(request_command("m2")) is None
+
+    pending = next(
+        item
+        for item in caplog.records
+        if item.name == "sdcal.raft.node"
+        and "command pending without quorum" in item.getMessage()
+    )
+    assert "msg_id=m2" in pending.getMessage()
