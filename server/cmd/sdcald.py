@@ -22,7 +22,11 @@ def start_raft_cluster(
     from server.ray_app.logging_config import get_logger
     from server.ray_app.raft_actor import start_raft_cluster as start_replicas
     from server.ray_app.raft_cluster import RaftCluster
-    from server.ray_app.raft_placement import head_placement_key, plan_node_placement
+    from server.ray_app.raft_placement import (
+        PlacementError,
+        head_placement_key,
+        plan_node_placement,
+    )
     from server.ray_app.raft_supervisor import start_supervisor
     from server.ray_app.raft_ticker import start_tickers
 
@@ -31,8 +35,18 @@ def start_raft_cluster(
     db_paths = {
         node_id: str(base / f"{node_id}.db") for node_id in node_ids
     }
-    node_assignments = plan_node_placement(node_ids, placement_mode)
     logger = get_logger("raft.placement")
+    skip_unassigned = False
+    try:
+        node_assignments = plan_node_placement(node_ids, placement_mode)
+    except PlacementError as exc:
+        # The cluster is already running but some nodes are down: attach to
+        # the existing replicas and let the supervisor recreate the missing
+        # ones on their original node.
+        logger.warning("strict placement unavailable reason=%s", exc)
+        node_assignments = {}
+        skip_unassigned = True
+
     if node_assignments:
         logger.info(
             "strict replica placement planned replicas=%d assignments=%s",
@@ -57,6 +71,7 @@ def start_raft_cluster(
         db_paths,
         namespace=namespace,
         node_assignments=node_assignments,
+        skip_unassigned=skip_unassigned,
     )
     start_tickers(
         actors,
@@ -70,7 +85,7 @@ def start_raft_cluster(
         node_assignments=node_assignments,
         supervisor_node_id=head_placement_key(),
     )
-    set_cluster(RaftCluster(actors, namespace=namespace))
+    set_cluster(RaftCluster(node_ids, namespace=namespace))
 
 
 def main() -> None:

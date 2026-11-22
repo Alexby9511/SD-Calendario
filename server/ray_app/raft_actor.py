@@ -17,6 +17,10 @@ from .raft_placement import placement_options
 from .raft_transport import DEFAULT_NAMESPACE, RayTransport, actor_name
 from .state import CalendarState
 
+DEFAULT_TRANSPORT_TIMEOUT = 0.1
+DEFAULT_ELECTION_TIMEOUT = (0.5, 1.5)
+DEFAULT_HEARTBEAT_INTERVAL = 0.05
+
 try:
     import ray
 except ImportError:
@@ -66,12 +70,14 @@ class RaftReplica:
         db_path: str,
         state_factory: Callable[[], ReplicatedState] = CalendarState,
         namespace: str = DEFAULT_NAMESPACE,
-        transport_timeout: float = 0.1,
-        election_timeout: Tuple[float, float] = (0.5, 1.5),
-        heartbeat_interval: float = 0.05,
+        transport_timeout: float = DEFAULT_TRANSPORT_TIMEOUT,
+        election_timeout: Tuple[float, float] = DEFAULT_ELECTION_TIMEOUT,
+        heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        placement_key: Optional[str] = None,
     ) -> None:
         self.state = state_factory()
         self.storage = SQLiteStorage(db_path)
+        self.placement_key = placement_key
         self.node = RaftNode(
             node_id,
             peers,
@@ -131,6 +137,7 @@ class RaftReplica:
 
     def status(self) -> Dict[str, Any]:
         status = self.node.status()
+        status["placement_key"] = self.placement_key
         if ray is not None:
             status["ray_node_id"] = ray.get_runtime_context().get_node_id()
         return status
@@ -151,6 +158,7 @@ def start_raft_cluster(
     detached: bool = True,
     get_if_exists: bool = True,
     node_assignments: Optional[Dict[str, str]] = None,
+    skip_unassigned: bool = False,
 ) -> Dict[str, Any]:
     """Start one actor per node and return ``node_id -> actor handle``.
 
@@ -164,6 +172,10 @@ def start_raft_cluster(
     API process attach to the replicas that already exist. When
     ``node_assignments`` is provided, each actor is pinned to its assigned
     Ray node so that its SQLite database remains node-local.
+
+    ``skip_unassigned`` leaves out the replicas without an assignment: the
+    supervisor recreates them on their original node instead of placing them
+    somewhere else.
     """
     if ray is None or RaftActor is None:
         raise RuntimeError("raft: ray is not installed")
@@ -179,6 +191,9 @@ def start_raft_cluster(
         raise ValueError("raft: replica placement requires distinct Ray nodes")
     actors: Dict[str, Any] = {}
     for node_id in started:
+        target_node = assignments.get(node_id)
+        if skip_unassigned and not target_node:
+            continue
         peers = [other for other in members if other != node_id]
         options: Dict[str, Any] = {
             "name": actor_name(node_id),
@@ -187,7 +202,6 @@ def start_raft_cluster(
         }
         if detached:
             options["lifetime"] = "detached"
-        target_node = assignments.get(node_id)
         if target_node:
             options.update(placement_options(target_node))
         actors[node_id] = RaftActor.options(**options).remote(
@@ -196,6 +210,10 @@ def start_raft_cluster(
             db_paths[node_id],
             state_factory,
             namespace,
+            DEFAULT_TRANSPORT_TIMEOUT,
+            DEFAULT_ELECTION_TIMEOUT,
+            DEFAULT_HEARTBEAT_INTERVAL,
+            target_node,
         )
     if actors:
         # Wait for every constructor to finish before the caller starts

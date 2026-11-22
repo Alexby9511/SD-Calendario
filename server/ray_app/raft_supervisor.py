@@ -12,7 +12,12 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .logging_config import get_logger
-from .raft_actor import RaftActor
+from .raft_actor import (
+    DEFAULT_ELECTION_TIMEOUT,
+    DEFAULT_HEARTBEAT_INTERVAL,
+    DEFAULT_TRANSPORT_TIMEOUT,
+    RaftActor,
+)
 from .raft_placement import placement_options, placement_target_alive
 from .raft_ticker import (
     DEFAULT_TICK_INTERVAL,
@@ -57,6 +62,7 @@ class _SupervisorReplica:
         self.node_assignments = dict(node_assignments)
         self.ticker_interval = ticker_interval
         self.ticker_prefix = ticker_prefix
+        self._known_placements: Dict[str, str] = dict(node_assignments)
         self._started = False
         self._thread: Optional[threading.Thread] = None
         self.logger = get_logger("raft.supervisor")
@@ -89,24 +95,35 @@ class _SupervisorReplica:
         """Recreate every replica or ticker that is not answering."""
         recovered: List[str] = []
         for node_id in self.node_ids:
-            if not self._is_alive(node_id):
+            status = self._status(node_id)
+            if status is None:
                 if self._recreate(node_id):
                     recovered.append(node_id)
+            else:
+                self._learn_placement(node_id, status)
             self._ensure_ticker(node_id)
         return recovered
 
-    def _is_alive(self, node_id: str) -> bool:
+    def _status(self, node_id: str) -> Optional[Dict[str, Any]]:
         try:
             actor = ray.get_actor(
                 actor_name(node_id), namespace=self.namespace
             )
         except Exception:
-            return False
+            return None
         try:
-            ray.get(actor.status.remote(), timeout=self.timeout)
+            return ray.get(actor.status.remote(), timeout=self.timeout)
         except Exception:
-            return False
-        return True
+            return None
+
+    def _learn_placement(self, node_id: str, status: Dict[str, Any]) -> None:
+        """Remember the placement target reported by a live replica."""
+        placement = status.get("placement_key")
+        if placement:
+            self._known_placements[node_id] = str(placement)
+
+    def _is_alive(self, node_id: str) -> bool:
+        return self._status(node_id) is not None
 
     def _node_is_alive(self, node_id: str) -> bool:
         try:
@@ -116,7 +133,7 @@ class _SupervisorReplica:
 
     def _recreate(self, node_id: str) -> bool:
         peers = [other for other in self.node_ids if other != node_id]
-        target_node = self.node_assignments.get(node_id)
+        target_node = self._known_placements.get(node_id)
         if target_node and not self._node_is_alive(target_node):
             self.logger.debug(
                 "replica waits for its Ray node node_id=%s target_node_id=%s",
@@ -140,6 +157,10 @@ class _SupervisorReplica:
                 self.db_paths[node_id],
                 self.state_factory,
                 self.namespace,
+                DEFAULT_TRANSPORT_TIMEOUT,
+                DEFAULT_ELECTION_TIMEOUT,
+                DEFAULT_HEARTBEAT_INTERVAL,
+                target_node,
             )
         except Exception as exc:
             self.logger.warning(

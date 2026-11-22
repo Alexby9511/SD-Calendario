@@ -207,7 +207,11 @@ def test_replica_follows_its_node_when_the_node_rejoins(
         assert wait_until(lambda: raft.leader() is not None)
         assert raft.propose(request_command())["code"] == 200
 
-        victim = "n1"
+        victim = next(
+            node_id
+            for node_id in node_ids
+            if assignments[node_id] != head_placement_key(ray.nodes())
+        )
         target = assignments[victim]
         resource = parse_placement_key(target)[1]
         old_node = node_id_of(target)
