@@ -9,4 +9,4 @@ COPY client ./client
 RUN pip install --no-cache-dir -e .
 
 EXPOSE 8080
-CMD ["python", "-m", "server.cmd.sdcald", "--ray-address=ray://ray-head:10001", "--host=0.0.0.0", "--port=8080"]
+CMD ["python", "-m", "server.cmd.sdcald", "--ray-address=ray://ray-head:10001", "--host=0.0.0.0", "--port=8080", "--raft-placement=strict"]

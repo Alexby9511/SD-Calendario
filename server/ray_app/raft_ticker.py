@@ -94,7 +94,7 @@ def start_tickers(
             "name": f"{prefix}{node_id}",
             "namespace": namespace,
             "lifetime": "detached",
-            "get_if_exists": False,
+            "get_if_exists": True,
         }
         target_node = assignments.get(node_id)
         if target_node:

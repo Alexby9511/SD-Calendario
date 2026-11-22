@@ -129,6 +129,24 @@ def test_cluster_refuses_to_commit_without_quorum(ticking_cluster):
     assert outcome is None
 
 
+def test_second_api_attaches_to_the_existing_tickers(ticking_cluster):
+    cluster, actors = ticking_cluster
+    assert wait_for_leader(cluster) is not None
+
+    attached = start_tickers(
+        actors, interval=0.05, namespace=cluster.namespace
+    )
+    try:
+        assert set(attached) == set(actors)
+        nodes = {
+            node_id: ray.get(ticker.node_id.remote())
+            for node_id, ticker in attached.items()
+        }
+        assert len(nodes) == 5
+    finally:
+        stop_tickers(attached)
+
+
 def test_api_commits_through_the_raft_cluster(ticking_cluster):
     from fastapi.testclient import TestClient
 

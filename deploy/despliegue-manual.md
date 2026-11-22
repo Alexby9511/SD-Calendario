@@ -1,7 +1,8 @@
 # Despliegue manual de SD Calendario sobre Ray
 
 Cada tipo de nodo se construye y se arranca con su propio `Dockerfile` y un
-`docker run`.
+`docker run`. El despliegue de referencia usa 1 head, 5 workers y 3 APIs sin
+estado: 5 réplicas Raft, una por nodo, con quórum 3/5.
 
 ## 1. Crear la red y las imágenes
 
@@ -36,45 +37,64 @@ docker logs ray-head
 ## 3. Arrancar los workers
 
 ```bash
-docker run -d --name ray-worker-1 --network sdcal sdcal-ray-worker \
-  ray start --address=ray-head:6379 --block
-
-docker run -d --name ray-worker-2 --network sdcal sdcal-ray-worker \
-  ray start --address=ray-head:6379 --block
+for index in 1 2 3 4 5; do
+  docker run -d --name "ray-worker-$index" --network sdcal sdcal-ray-worker \
+    ray start --address=ray-head:6379 --block
+done
 ```
 
-Comprobar que ambos contenedores siguen activos:
+Comprobar que los cinco contenedores siguen activos:
 
 ```bash
 docker ps --filter name=ray-
 ```
 
-## 4. Arrancar la API
+Con 5 workers y el head, el planificador estricto coloca una réplica Raft en
+cada nodo worker y deja el head para el supervisor. Si un worker cae, el
+supervisor espera a que vuelva para recrear la réplica sobre su SQLite local;
+no la mueve a otro nodo.
+
+## 4. Arrancar las APIs
 
 ```bash
-docker run -d --name sdcal-api --network sdcal -p 8081:8080 \
-  sdcal-ray-api \
-  python -m server.cmd.sdcald \
-  --ray-address=ray://ray-head:10001 --host=0.0.0.0 --port=8080
+for index in 1 2 3; do
+  port=$((8080 + index))
+  docker run -d --name "sdcal-api-$index" --network sdcal -p "$port:8080" \
+    sdcal-ray-api
+done
 ```
 
-La API se conecta al Ray Client del head mediante `ray-head:10001`. El acceso
-externo es `http://localhost:8081`.
+Las tres APIs se conectan al Ray Client del head mediante `ray-head:10001` y
+son intercambiables: todas adjuntan a los actores existentes por nombre
+(`get_if_exists`) y enrutan las escrituras al líder. El acceso externo es
+`http://localhost:8081`, `http://localhost:8082` y `http://localhost:8083`.
 
-## 5. Comprobar conectividad
+## 5. Comprobar conectividad y tolerancia
 
 ```bash
 curl http://localhost:8081/health
-curl http://localhost:8081/v1/status
-docker logs sdcal-api
+curl http://localhost:8082/v1/status
+curl http://localhost:8083/v1/status
+docker logs sdcal-api-1
 ```
 
-El estado debe indicar `middleware: ray`. La API, el head y los workers se
-comunican exclusivamente a través de Ray y de la red Docker privada.
+El estado debe indicar `middleware: ray` y cinco réplicas. Para comprobar la
+redundancia, detener dos APIs y dos workers:
+
+```bash
+docker rm -f sdcal-api-2 sdcal-api-3 ray-worker-4 ray-worker-5
+curl http://localhost:8081/v1/status
+```
+
+La API restante debe seguir confirmando comandos: quedan tres réplicas vivas,
+justo el quórum 3/5. Al volver a levantar los workers, el supervisor recrea sus
+réplicas desde el SQLite local y estas se ponen al día por log o snapshot.
 
 ## 6. Detener el despliegue
 
 ```bash
-docker rm -f sdcal-api ray-worker-2 ray-worker-1 ray-head
+docker rm -f $(seq -f 'sdcal-api-%g' 1 3)
+docker rm -f $(seq -f 'ray-worker-%g' 1 5)
+docker rm -f ray-head
 docker network rm sdcal
 ```
