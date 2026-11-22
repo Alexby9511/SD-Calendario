@@ -14,6 +14,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from .logging_config import get_logger
 from .raft_actor import RaftActor
 from .raft_placement import strict_node_affinity
+from .raft_ticker import (
+    DEFAULT_TICK_INTERVAL,
+    DEFAULT_TICKER_PREFIX,
+    TickerActor,
+)
 from .raft_transport import DEFAULT_NAMESPACE, actor_name
 from .state import CalendarState
 
@@ -40,6 +45,8 @@ class _SupervisorReplica:
         interval: float,
         timeout: float,
         node_assignments: Dict[str, str],
+        ticker_interval: float,
+        ticker_prefix: str,
     ) -> None:
         self.node_ids = list(node_ids)
         self.db_paths = dict(db_paths)
@@ -48,6 +55,8 @@ class _SupervisorReplica:
         self.interval = interval
         self.timeout = timeout
         self.node_assignments = dict(node_assignments)
+        self.ticker_interval = ticker_interval
+        self.ticker_prefix = ticker_prefix
         self._started = False
         self._thread: Optional[threading.Thread] = None
         self.logger = get_logger("raft.supervisor")
@@ -77,13 +86,13 @@ class _SupervisorReplica:
             time.sleep(self.interval)
 
     def check(self) -> List[str]:
-        """Recreate every replica that is not answering."""
+        """Recreate every replica or ticker that is not answering."""
         recovered: List[str] = []
         for node_id in self.node_ids:
-            if self._is_alive(node_id):
-                continue
-            if self._recreate(node_id):
-                recovered.append(node_id)
+            if not self._is_alive(node_id):
+                if self._recreate(node_id):
+                    recovered.append(node_id)
+            self._ensure_ticker(node_id)
         return recovered
 
     def _is_alive(self, node_id: str) -> bool:
@@ -145,6 +154,48 @@ class _SupervisorReplica:
         self.logger.info("recreated replica node_id=%s", node_id)
         return True
 
+    def _ticker_is_alive(self, node_id: str) -> bool:
+        try:
+            ticker = ray.get_actor(
+                f"{self.ticker_prefix}{node_id}", namespace=self.namespace
+            )
+        except Exception:
+            return False
+        try:
+            ray.get(ticker.node_id.remote(), timeout=self.timeout)
+        except Exception:
+            return False
+        return True
+
+    def _ensure_ticker(self, node_id: str) -> bool:
+        """Recreate a missing ticker so the replica keeps its timers."""
+        if self._ticker_is_alive(node_id):
+            return False
+        target_node = self.node_assignments.get(node_id)
+        if target_node and not self._node_is_alive(target_node):
+            return False
+
+        options: Dict[str, Any] = {
+            "name": f"{self.ticker_prefix}{node_id}",
+            "namespace": self.namespace,
+            "lifetime": "detached",
+            "get_if_exists": True,
+        }
+        if target_node:
+            options["scheduling_strategy"] = strict_node_affinity(target_node)
+        try:
+            ticker = TickerActor.options(**options).remote(
+                node_id, self.namespace, self.ticker_interval
+            )
+            ticker.run.remote()
+        except Exception as exc:
+            self.logger.warning(
+                "could not recreate ticker node_id=%s reason=%r", node_id, exc
+            )
+            return False
+        self.logger.info("recreated ticker node_id=%s", node_id)
+        return True
+
 
 SupervisorActor = (
     ray.remote(num_cpus=0)(_SupervisorReplica) if ray is not None else None
@@ -161,6 +212,8 @@ def start_supervisor(
     name: str = DEFAULT_SUPERVISOR_NAME,
     node_assignments: Optional[Dict[str, str]] = None,
     supervisor_node_id: Optional[str] = None,
+    ticker_interval: float = DEFAULT_TICK_INTERVAL,
+    ticker_prefix: str = DEFAULT_TICKER_PREFIX,
 ) -> Any:
     """Start (or attach to) the detached supervisor of the replicas."""
     if ray is None or SupervisorActor is None:
@@ -181,6 +234,8 @@ def start_supervisor(
         interval,
         timeout,
         dict(node_assignments or {}),
+        ticker_interval,
+        ticker_prefix,
     )
     supervisor.run.remote()
     return supervisor

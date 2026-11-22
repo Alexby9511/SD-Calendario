@@ -607,11 +607,25 @@ class RaftNode:
         self._pre_votes = set()
         self._pre_vote_term = None
         self._reset_election_deadline()
-        if previous_role is not Role.FOLLOWER or term > previous_term:
+        if previous_role is Role.LEADER:
             self.logger.info(
-                "stepped down node_id=%s from_role=%s term=%d previous_term=%d",
+                "stepped down node_id=%s from_role=leader term=%d previous_term=%d",
+                self.node_id,
+                self.current_term,
+                previous_term,
+            )
+        elif previous_role in (Role.CANDIDATE, Role.PRE_CANDIDATE):
+            self.logger.info(
+                "abandoned election node_id=%s from_role=%s term=%d previous_term=%d",
                 self.node_id,
                 previous_role.value,
+                self.current_term,
+                previous_term,
+            )
+        elif term > previous_term:
+            self.logger.debug(
+                "advanced term node_id=%s term=%d previous_term=%d",
+                self.node_id,
                 self.current_term,
                 previous_term,
             )

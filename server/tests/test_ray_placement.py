@@ -14,7 +14,10 @@ from server.ray_app.raft_placement import (
     plan_node_placement,
 )
 from server.ray_app.raft_supervisor import start_supervisor, stop_supervisor
-from server.ray_app.raft_ticker import start_tickers, stop_tickers
+from server.ray_app.raft_ticker import (
+    DEFAULT_TICKER_PREFIX,
+    start_tickers,
+)
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +111,22 @@ def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
         assert ticker_nodes == assignments
         assert ray.get(supervisor.node_id.remote()) == head_node_id(ray.nodes())
 
+        ray.kill(tickers["n1"])
+
+        def ticker_recovered_on_same_node():
+            try:
+                ticker = ray.get_actor(
+                    f"{DEFAULT_TICKER_PREFIX}n1", namespace=namespace
+                )
+                return (
+                    ray.get(ticker.node_id.remote(), timeout=1.0)
+                    == assignments["n1"]
+                )
+            except Exception:
+                return False
+
+        assert wait_until(ticker_recovered_on_same_node)
+
         assert wait_until(lambda: raft.leader() is not None)
         result = raft.propose(request_command())
         assert result["code"] == 200
@@ -129,6 +148,13 @@ def test_replicas_use_distinct_nodes_and_recreation_keeps_affinity(
         assert recreated["last_log_index"] == 1
         assert (tmp_path / f"{victim}.db").exists()
     finally:
-        stop_tickers(tickers)
         stop_supervisor(supervisor)
+        for node_id in node_ids:
+            try:
+                ticker = ray.get_actor(
+                    f"{DEFAULT_TICKER_PREFIX}{node_id}", namespace=namespace
+                )
+                ray.kill(ticker)
+            except Exception:
+                pass
         stop_raft_cluster(actors)
