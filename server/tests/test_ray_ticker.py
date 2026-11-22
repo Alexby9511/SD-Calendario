@@ -180,11 +180,18 @@ def test_cluster_replaces_a_dead_leader_and_follower(ticking_cluster):
     assert len(cluster.statuses()) == 3
 
 
-def test_api_commits_through_the_raft_cluster(ticking_cluster):
+def test_api_commits_through_the_raft_cluster(ticking_cluster, monkeypatch):
+    import json
+
     from fastapi.testclient import TestClient
 
     from server.ray_app import api
 
+    monkeypatch.setenv(
+        "SDCAL_API_TOKENS",
+        json.dumps({"alice": "a" * 40}),
+    )
+    headers = {"Authorization": "Bearer " + "a" * 40}
     cluster, actors = ticking_cluster
     api.set_cluster(cluster)
     try:
@@ -192,17 +199,20 @@ def test_api_commits_through_the_raft_cluster(ticking_cluster):
         client = TestClient(api.app)
 
         response = client.post(
-            "/v1/commands", json=request_command(51, "Desde la API")
+            "/v1/commands",
+            json=request_command(51, "Desde la API"),
+            headers=headers,
         )
         assert response.status_code == 200
         assert response.json()["code"] == 200
 
-        status = client.get("/v1/status").json()
+        status = client.get("/v1/status", headers=headers).json()
         assert status["leader_id"] is not None
         assert len(status["replicas"]) == 5
 
         event = client.get(
-            "/v1/kv/alice:01J00000000000000000000051"
+            "/v1/kv/alice:01J00000000000000000000051",
+            headers=headers,
         ).json()
         assert event["found"] is True
         assert event["value"]["state"] == "CONFIRMED"
