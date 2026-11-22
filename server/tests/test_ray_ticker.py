@@ -147,6 +147,39 @@ def test_second_api_attaches_to_the_existing_tickers(ticking_cluster):
         stop_tickers(attached)
 
 
+def test_cluster_replaces_a_dead_leader_and_follower(ticking_cluster):
+    cluster, actors = ticking_cluster
+    leader_id = wait_for_leader(cluster)
+    assert leader_id is not None
+    follower_id = [node_id for node_id in actors if node_id != leader_id][0]
+    victims = {leader_id, follower_id}
+    for node_id in victims:
+        ray.kill(actors[node_id])
+
+    def new_leader():
+        statuses = cluster.statuses()
+        leaders = [
+            node_id
+            for node_id, status in statuses.items()
+            if status["role"] == "leader"
+        ]
+        if len(leaders) == 1 and leaders[0] not in victims:
+            return leaders[0]
+        return None
+
+    assert wait_for_leader(cluster, timeout=15.0) is not None
+    deadline = time.monotonic() + 15.0
+    replacement = None
+    while time.monotonic() < deadline and replacement is None:
+        replacement = new_leader()
+        time.sleep(0.05)
+    assert replacement is not None
+
+    result = cluster.propose(request_command(44, "Sin líder y seguidor"))
+    assert result["code"] == 200
+    assert len(cluster.statuses()) == 3
+
+
 def test_api_commits_through_the_raft_cluster(ticking_cluster):
     from fastapi.testclient import TestClient
 
