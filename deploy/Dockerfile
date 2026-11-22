@@ -6,7 +6,12 @@ COPY pkg ./pkg
 COPY server ./server
 COPY client ./client
 
-RUN pip install --no-cache-dir -e .
+COPY deploy/wheelhouse /wheelhouse
+ARG PIP_ARGS="--timeout 60 --retries 10"
+RUN pip install --no-cache-dir $PIP_ARGS --find-links=/wheelhouse -e .
+
+COPY deploy/ray-head.sh /usr/local/bin/ray-head
+RUN chmod +x /usr/local/bin/ray-head
 
 EXPOSE 6379 8265 10001
-CMD ["ray", "start", "--head", "--port=6379", "--ray-client-server-port=10001", "--dashboard-host=0.0.0.0", "--dashboard-port=8265", "--block"]
+ENTRYPOINT ["/usr/local/bin/ray-head"]

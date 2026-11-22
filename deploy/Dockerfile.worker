@@ -6,6 +6,11 @@ COPY pkg ./pkg
 COPY server ./server
 COPY client ./client
 
-RUN pip install --no-cache-dir -e .
+COPY deploy/wheelhouse /wheelhouse
+ARG PIP_ARGS="--timeout 60 --retries 10"
+RUN pip install --no-cache-dir $PIP_ARGS --find-links=/wheelhouse -e .
 
-CMD ["ray", "start", "--address=ray-head:6379", "--block"]
+COPY deploy/ray-worker.sh /usr/local/bin/ray-worker
+RUN chmod +x /usr/local/bin/ray-worker
+
+ENTRYPOINT ["/usr/local/bin/ray-worker"]

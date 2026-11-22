@@ -17,6 +17,11 @@ client/build/bin/
 *.db
 *.db-shm
 *.db-wal
+.venv/
 
 # Local agent instructions
 /AGENTS.md
+
+# Local wheel cache used to build the container images offline
+/deploy/wheelhouse/*
+!/deploy/wheelhouse/.gitkeep
