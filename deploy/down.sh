@@ -15,6 +15,7 @@ docker rm -f ray-head >/dev/null 2>&1 || true
 
 log "borrando volúmenes de datos"
 docker volume rm $(seq -f 'sdcal-data-%g' 1 "$WORKERS") >/dev/null 2>&1 || true
+docker volume rm sdcal-gcs-data >/dev/null 2>&1 || true
 
 log "borrando red"
 docker network rm "$NETWORK" >/dev/null 2>&1 || true

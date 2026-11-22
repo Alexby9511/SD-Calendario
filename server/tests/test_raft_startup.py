@@ -94,16 +94,18 @@ def test_connect_ray_retries_a_transient_client_proxy_failure(monkeypatch):
 
         def init(self, address=None, ignore_reinit_error=False):
             self.attempts += 1
-            if self.attempts < 3:
+            if self.attempts < 2:
                 raise ConnectionAbortedError("client proxy failed")
 
         def is_initialized(self):
             return False
 
     fake = FakeRay()
+    sleeps = []
     monkeypatch.setitem(sys.modules, "ray", fake)
-    monkeypatch.setattr(sdcald.time, "sleep", lambda _: None)
+    monkeypatch.setattr(sdcald.time, "sleep", sleeps.append)
 
-    sdcald.connect_ray("ray://head:10001", attempts=3)
+    sdcald.connect_ray("ray://head:10001")
 
-    assert fake.attempts == 3
+    assert fake.attempts == 2
+    assert sleeps == [1]

@@ -11,11 +11,14 @@ estado: 5 réplicas Raft, una por nodo, con quórum 3/5.
 ./deploy/down.sh        # detiene los contenedores y borra los volúmenes
 ./deploy/demo.sh        # propuesta, reintento con el mismo msg_id y estado
 ./deploy/caos-nivel2.sh # caos de nivel 2: 2 APIs + 2 nodos caídos a la vez
+./deploy/caos-any-two.sh # prueba de recuperación ante cada par de contenedores
 ```
 
 Variables: `SDCAL_NETWORK` (red), `SDCAL_IMAGE` (prefijo de imágenes),
 `SDCAL_WORKERS` (5), `SDCAL_APIS` (3) y `SDCAL_SKIP_BUILD=1` para reutilizar las
-imágenes ya construidas.
+imágenes ya construidas. `SDCAL_API_TOKENS` debe contener un objeto JSON que
+asocie cada usuario con uno o varios tokens Bearer de al menos 32 caracteres.
+Los tokens se inyectan en las APIs y no se guardan en el repositorio.
 
 ## 1. Crear la red y las imágenes
 
@@ -34,14 +37,20 @@ La red `sdcal` proporciona resolución DNS entre contenedores. El nombre
 ## 2. Arrancar el head
 
 ```bash
-docker run -d --name ray-head --network sdcal \
+docker run -d --restart unless-stopped --name ray-head --network sdcal \
   -p 6379:6379 -p 8265:8265 \
+  -v sdcal-gcs-data:/app/data/gcs \
   sdcal-ray-head
 ```
 
 El entrypoint `deploy/ray-head.sh` arranca Ray con el recurso
 `sdcal-node-head`, que identifica el head de forma estable aunque Ray le
-asigne otro NodeID tras un reinicio.
+asigne otro NodeID tras un reinicio. También desactiva el soporte `atfork` de
+gRPC (`GRPC_ENABLE_FORK_SUPPORT=0`) para evitar fallos al iniciar los procesos
+del proxy de Ray Client. GCS persiste su metadato en el volumen
+`sdcal-gcs-data` para recuperar el clúster al reiniciar el contenedor. Esta
+recuperación usa el backend RocksDB experimental de Ray 2.60; no cubre la
+pérdida física del host Docker.
 
 Esperar a que el head esté listo antes de arrancar los workers:
 
@@ -53,7 +62,8 @@ docker logs ray-head
 
 ```bash
 for index in 1 2 3 4 5; do
-  docker run -d --name "ray-worker-$index" --network sdcal \
+  docker run -d --restart unless-stopped \
+    --name "ray-worker-$index" --network sdcal \
     -e SDCAL_NODE_ID="$index" \
     -v "sdcal-data-$index:/app/data" \
     sdcal-ray-worker
@@ -80,7 +90,9 @@ sobre su SQLite local; no la mueve a otro nodo.
 ```bash
 for index in 1 2 3; do
   port=$((8080 + index))
-  docker run -d --name "sdcal-api-$index" --network sdcal -p "$port:8080" \
+  docker run -d --restart unless-stopped \
+    --name "sdcal-api-$index" --network sdcal \
+    -e SDCAL_API_TOKENS="$SDCAL_API_TOKENS" -p "$port:8080" \
     sdcal-ray-api
 done
 ```
@@ -89,6 +101,8 @@ Las tres APIs se conectan al Ray Client del head mediante `ray-head:10001` y
 son intercambiables: todas adjuntan a los actores existentes por nombre
 (`get_if_exists`) y enrutan las escrituras al líder. El acceso externo es
 `http://localhost:8081`, `http://localhost:8082` y `http://localhost:8083`.
+Si falla la conexión inicial, cada API reintenta una vez antes de abortar el
+arranque.
 
 La imagen de la API usa `--raft-placement=strict`: si no hay nodos suficientes
 para colocar las cinco réplicas, la API se adjunta a las réplicas que ya
@@ -98,9 +112,19 @@ funcionan y el supervisor recrea las que falten en su nodo original.
 
 ```bash
 curl http://localhost:8081/health
-curl http://localhost:8082/v1/status
-curl http://localhost:8083/v1/status
+curl http://localhost:8081/ready
+curl -H "Authorization: Bearer $SDCAL_ALICE_TOKEN" \
+  http://localhost:8082/v1/status
 docker logs sdcal-api-1
+```
+
+`/ready` requiere tokens configurados, líder y quórum. Las rutas `/v1/*`
+requieren autenticación Bearer. Para probar eventos, disponibilidad y
+sincronización frente a todos los pares de contenedores, con recuperación
+automática al finalizar, ejecutar:
+
+```bash
+./deploy/caos-any-two.sh
 ```
 
 El estado debe indicar `middleware: ray` y cinco réplicas. Para comprobar la
@@ -128,5 +152,6 @@ docker rm -f $(seq -f 'sdcal-api-%g' 1 3)
 docker rm -f $(seq -f 'ray-worker-%g' 1 5)
 docker rm -f ray-head
 docker volume rm $(seq -f 'sdcal-data-%g' 1 5)
+docker volume rm sdcal-gcs-data
 docker network rm sdcal
 ```

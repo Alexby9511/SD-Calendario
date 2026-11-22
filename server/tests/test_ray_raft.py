@@ -7,6 +7,7 @@ ray = pytest.importorskip("ray")
 
 from server.ray_app.consensus.transport import TransportError
 from server.ray_app.raft_actor import start_raft_cluster, stop_raft_cluster
+from server.ray_app.raft_cluster import RaftCluster
 from server.ray_app.raft_transport import RayTransport, actor_name
 
 
@@ -94,7 +95,7 @@ def test_ray_transport_unblocks_when_named_actor_reappears(ray_runtime):
 
 
 def test_ray_cluster_elects_leader_and_commits(cluster):
-    _, actors = cluster
+    namespace, actors = cluster
     ray.get(actors["n0"].start_election.remote())
 
     status = ray.get(actors["n0"].status.remote())
@@ -115,6 +116,16 @@ def test_ray_cluster_elects_leader_and_commits(cluster):
         assert snapshot["applied_index"] == 1
         assert "alice:01J00000000000000000000011" in snapshot["events"]
 
+    calendar = RaftCluster(list(actors), namespace=namespace)
+    assert calendar.sync(0)["entries"][0]["index"] == 1
+    assert calendar.conflicts(
+        "alice", "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z"
+    )["conflicts"] == []
+    assert calendar.availability(["alice", "bob"])["users"] == {
+        "alice": "available",
+        "bob": "available",
+    }
+
 
 def test_ray_follower_rejects_propose(cluster):
     _, actors = cluster
@@ -122,6 +133,11 @@ def test_ray_follower_rejects_propose(cluster):
     with pytest.raises(Exception) as exc_info:
         ray.get(actors["n1"].propose.remote(request_command(21, "Reunión")))
     assert "not the leader" in str(exc_info.value)
+
+
+def test_sync_rejects_invalid_cursor_before_ray_execution():
+    with pytest.raises(ValueError, match="invalid_sync_cursor"):
+        RaftCluster([]).sync(-1)
 
 
 def test_ray_lagging_replica_installs_snapshot(ray_runtime, tmp_path):

@@ -5,6 +5,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+if [ -z "${SDCAL_DEMO_TOKEN:-}" ]; then
+  printf 'FALLO: configura SDCAL_DEMO_TOKEN y SDCAL_API_TOKENS para alice\n' >&2
+  exit 1
+fi
+
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 cleanup() { "$ROOT/deploy/down.sh" >/dev/null 2>&1 || true; }
@@ -16,11 +21,14 @@ COMMAND='{"deployment_id":"dep1","group_id":"team","msg_id":"01J0000000000000000
 
 log "creando propuesta a través de la API 1"
 curl -fsS -X POST http://localhost:8081/v1/commands \
+  -H "Authorization: Bearer $SDCAL_DEMO_TOKEN" \
   -H 'Content-Type: application/json' -d "$COMMAND"
 
 log "reintentando el mismo msg_id a través de la API 2"
 curl -fsS -X POST http://localhost:8082/v1/commands \
+  -H "Authorization: Bearer $SDCAL_DEMO_TOKEN" \
   -H 'Content-Type: application/json' -d "$COMMAND"
 
 log "estado desde la API 3"
-curl -fsS http://localhost:8083/v1/status
+curl -fsS -H "Authorization: Bearer $SDCAL_DEMO_TOKEN" \
+  http://localhost:8083/v1/status

@@ -8,7 +8,7 @@ from server.ray_app.logging_config import get_logger
 from server.ray_app.raft_placement import PLACEMENT_MODES, alive_node_count
 
 
-def connect_ray(address, attempts: int = 5) -> None:
+def connect_ray(address, attempts: int = 2) -> None:
     """Connect to the Ray cluster, retrying transient client-server races.
 
     The head exposes a single Ray Client port. When several APIs connect at
@@ -38,7 +38,7 @@ def connect_ray(address, attempts: int = 5) -> None:
                     ray.shutdown()
             except Exception:
                 pass
-            time.sleep(min(attempt, 3))
+            time.sleep(min(attempt, 2))
     raise RuntimeError("ray: could not connect to the cluster") from last_error
 
 
@@ -143,6 +143,7 @@ def start_raft_cluster(
 
 
 def main() -> None:
+    ray_monitor = None
     parser = argparse.ArgumentParser(description="SD Calendario sobre Ray")
     parser.add_argument("--ray-address", default=None)
     parser.add_argument("--host", default="0.0.0.0")
@@ -181,10 +182,34 @@ def main() -> None:
                 args.raft_namespace,
                 args.raft_placement,
             )
+        import ray
+
+        from server.ray_app.ray_monitor import RayConnectionMonitor
+
+        def reattach_raft_cluster() -> None:
+            if args.raft_replicas > 0:
+                start_raft_cluster(
+                    args.raft_replicas,
+                    args.raft_data_dir,
+                    args.raft_namespace,
+                    args.raft_placement,
+                )
+
+        ray_monitor = RayConnectionMonitor(
+            ray,
+            args.ray_address,
+            connect_ray,
+            reattach_raft_cluster,
+        )
+        ray_monitor.start()
 
     from server.ray_app.api import app
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    try:
+        uvicorn.run(app, host=args.host, port=args.port)
+    finally:
+        if ray_monitor is not None:
+            ray_monitor.stop()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 #   SDCAL_IMAGE     prefijo de las imágenes (sdcal-ray:local)
 #   SDCAL_WORKERS   número de workers (5)
 #   SDCAL_APIS      número de APIs (3)
+#   SDCAL_API_TOKENS JSON de usuario a token Bearer
 #   SDCAL_SKIP_BUILD=1 reutiliza las imágenes ya construidas
 set -euo pipefail
 
@@ -16,6 +17,11 @@ WORKERS="${SDCAL_WORKERS:-5}"
 APIS="${SDCAL_APIS:-3}"
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+if [ -z "${SDCAL_API_TOKENS:-}" ]; then
+  printf 'FALLO: configura SDCAL_API_TOKENS como JSON de usuario a token\n' >&2
+  exit 1
+fi
 
 log "creando red"
 docker network create "$NETWORK" >/dev/null 2>&1 || true
@@ -42,15 +48,17 @@ if [ "${SDCAL_SKIP_BUILD:-0}" != "1" ]; then
 fi
 
 log "levantando Ray head"
-docker run -d --name ray-head --network "$NETWORK" \
+docker run -d --restart unless-stopped --name ray-head --network "$NETWORK" \
   -p 6379:6379 -p 8265:8265 \
+  -v sdcal-gcs-data:/app/data/gcs \
   "$IMAGE-head" >/dev/null
 
 sleep 5
 
 log "levantando $WORKERS workers"
 for index in $(seq 1 "$WORKERS"); do
-  docker run -d --name "ray-worker-$index" --network "$NETWORK" \
+  docker run -d --restart unless-stopped \
+    --name "ray-worker-$index" --network "$NETWORK" \
     -e SDCAL_NODE_ID="$index" \
     -v "sdcal-data-$index:/app/data" \
     "$IMAGE-worker" >/dev/null
@@ -61,7 +69,9 @@ sleep 5
 log "levantando $APIS APIs sin estado"
 for index in $(seq 1 "$APIS"); do
   port=$((8080 + index))
-  docker run -d --name "sdcal-api-$index" --network "$NETWORK" \
+  docker run -d --restart unless-stopped \
+    --name "sdcal-api-$index" --network "$NETWORK" \
+    -e SDCAL_API_TOKENS="$SDCAL_API_TOKENS" \
     -p "$port:8080" "$IMAGE-api" >/dev/null
   # El proxy de Ray Client asigna un puerto por conexión; escalonar el
   # arranque evita la carrera entre las tres APIs.
@@ -70,12 +80,12 @@ for index in $(seq 1 "$APIS"); do
   fi
 done
 
-log "esperando APIs"
+log "esperando APIs listas con líder y quórum"
 for index in $(seq 1 "$APIS"); do
   port=$((8080 + index))
   healthy=0
   for _ in $(seq 1 90); do
-    if curl -fsS "http://localhost:$port/health" >/dev/null 2>&1; then
+    if curl -fsS "http://localhost:$port/ready" >/dev/null 2>&1; then
       healthy=1
       break
     fi
@@ -87,6 +97,28 @@ for index in $(seq 1 "$APIS"); do
   done
   if [ "$healthy" != "1" ]; then
     docker logs "sdcal-api-$index" 2>&1 | tail -40 >&2
+    exit 1
+  fi
+done
+
+log "verificando estado de los contenedores"
+for container in ray-head; do
+  if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != "true" ]; then
+    docker logs "$container" 2>&1 | tail -40 >&2
+    exit 1
+  fi
+done
+for index in $(seq 1 "$WORKERS"); do
+  container="ray-worker-$index"
+  if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != "true" ]; then
+    docker logs "$container" 2>&1 | tail -40 >&2
+    exit 1
+  fi
+done
+for index in $(seq 1 "$APIS"); do
+  container="sdcal-api-$index"
+  if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != "true" ]; then
+    docker logs "$container" 2>&1 | tail -40 >&2
     exit 1
   fi
 done

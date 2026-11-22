@@ -6,6 +6,8 @@
 # reinicio del contenedor, a diferencia del NodeID de Ray.
 set -euo pipefail
 
+export RAY_gcs_rpc_server_reconnect_timeout_s=120
+
 node_id="${SDCAL_NODE_ID:-worker}"
 address="${RAY_ADDRESS:-ray-head:6379}"
 

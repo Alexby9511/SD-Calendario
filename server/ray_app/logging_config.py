@@ -5,19 +5,27 @@ the identifiers of the operation when they are known.
 """
 
 import logging
-import time
+from datetime import datetime, timezone
 from typing import Optional
 
 _CONFIGURED = False
 
 
+class UTCFormatter(logging.Formatter):
+    def formatTime(
+        self, record: logging.LogRecord, datefmt: Optional[str] = None
+    ) -> str:
+        timestamp = datetime.fromtimestamp(record.created, timezone.utc)
+        if datefmt:
+            return timestamp.strftime(datefmt)
+        return timestamp.isoformat()
+
+
 def _formatter() -> logging.Formatter:
-    formatter = logging.Formatter(
+    return UTCFormatter(
         "%(asctime)s %(levelname)s %(name)s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S%z",
     )
-    formatter.converter = time.gmtime
-    return formatter
 
 
 def get_logger(component: str, level: Optional[int] = None) -> logging.Logger:

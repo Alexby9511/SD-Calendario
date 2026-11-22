@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .consensus.node import NotLeaderError
 from .consensus.transport import TransportError
+from .fsm import CalendarFSM
 from .raft_transport import DEFAULT_ACTOR_PREFIX, DEFAULT_NAMESPACE, actor_name
 
 try:
@@ -17,6 +18,21 @@ except ImportError:
 
 _RAY_ERRORS: Tuple[type, ...] = (
     (ray.exceptions.RayError,) if ray is not None else ()
+)
+
+
+def _run_calendar_query(
+    snapshot: Dict[str, Any], method: str, args: Tuple[Any, ...]
+) -> Dict[str, Any]:
+    """Run a read-only calendar query against an immutable replica snapshot."""
+    state = CalendarFSM.from_snapshot(snapshot)
+    if method not in ("availability", "conflicts", "sync", "sync_for"):
+        raise ValueError(f"raft: unsupported calendar query {method!r}")
+    return getattr(state, method)(*args)
+
+
+calendar_query_task = (
+    ray.remote(num_cpus=0.1)(_run_calendar_query) if ray is not None else None
 )
 
 
@@ -105,11 +121,18 @@ class RaftCluster:
     def status(self) -> Dict[str, Any]:
         """Aggregate the state of every replica."""
         statuses = self.statuses()
+        quorum_size = len(self.node_ids) // 2 + 1
+        alive_replicas = len(statuses)
+        leader_id = self.leader(statuses)
         return {
             "service": "sd-calendario",
             "middleware": "ray",
-            "leader_id": self.leader(statuses),
+            "leader_id": leader_id,
             "replicas": statuses,
+            "expected_replicas": len(self.node_ids),
+            "alive_replicas": alive_replicas,
+            "quorum_size": quorum_size,
+            "quorum_available": alive_replicas >= quorum_size,
         }
 
     def call_leader(self, method: str, *args: Any) -> Any:
@@ -133,7 +156,45 @@ class RaftCluster:
         start: Optional[str] = None,
         end: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return self.call_leader("availability", users, start, end)
+        snapshot = self.snapshot()
+        selected = users if users else sorted(
+            set(snapshot.get("busy", {}))
+            | {
+                user
+                for event in snapshot.get("events", {}).values()
+                for user in [event["organizer"], *event["participants"]]
+            }
+        )
+        if not selected:
+            return {"users": {}, "as_of": snapshot["applied_index"]}
+
+        # Bound fan-out while keeping independent user projections concurrent.
+        batch_count = min(4, len(selected))
+        batch_size = (len(selected) + batch_count - 1) // batch_count
+        batches = [
+            selected[index : index + batch_size]
+            for index in range(0, len(selected), batch_size)
+        ]
+        snapshot_ref = ray.put(snapshot)
+        pending = [
+            calendar_query_task.remote(
+                snapshot_ref, "availability", (batch, start, end)
+            )
+            for batch in batches
+        ]
+        result: Dict[str, Any] = {
+            "users": {},
+            "as_of": snapshot["applied_index"],
+        }
+        while pending:
+            ready, pending = ray.wait(
+                pending, num_returns=1, timeout=self.timeout
+            )
+            if not ready:
+                raise TimeoutError("raft: availability query task timed out")
+            partial = ray.get(ready[0], timeout=self.timeout)
+            result["users"].update(partial["users"])
+        return result
 
     def conflicts(
         self,
@@ -142,7 +203,30 @@ class RaftCluster:
         end: str,
         exclude_uid: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return self.call_leader("conflicts", user, start, end, exclude_uid)
+        snapshot_ref = ray.put(self.snapshot())
+        return ray.get(
+            calendar_query_task.remote(
+                snapshot_ref, "conflicts", (user, start, end, exclude_uid)
+            ),
+            timeout=self.timeout,
+        )
 
-    def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
-        return self.call_leader("sync", since, limit)
+    def sync(
+        self,
+        since: int = 0,
+        limit: int = 100,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if since < 0 or limit <= 0:
+            raise ValueError("invalid_sync_cursor")
+        snapshot_ref = ray.put(self.snapshot())
+        method = "sync_for" if user_id is not None else "sync"
+        args = (
+            (user_id, since, limit)
+            if user_id is not None
+            else (since, limit)
+        )
+        return ray.get(
+            calendar_query_task.remote(snapshot_ref, method, args),
+            timeout=self.timeout,
+        )

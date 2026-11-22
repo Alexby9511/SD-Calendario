@@ -57,7 +57,9 @@ class ReplicatedState(Protocol):
     ) -> Dict[str, Any]:
         """Return the events of ``user`` that overlap the given window."""
 
-    def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
+    def sync(
+        self, since: int = 0, limit: int = 100, user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Return the applied entries after the given cursor."""
 
 
@@ -133,8 +135,10 @@ class RaftReplica:
     ) -> Dict[str, Any]:
         return self.state.conflicts(user, start, end, exclude_uid)
 
-    def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
-        return self.state.sync(since, limit)
+    def sync(
+        self, since: int = 0, limit: int = 100, user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self.state.sync(since, limit, user_id)
 
     def status(self) -> Dict[str, Any]:
         status = self.node.status()

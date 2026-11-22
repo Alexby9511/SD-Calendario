@@ -9,6 +9,7 @@ create a split brain when it rejoins.
 import logging
 import random
 import re
+from itertools import combinations
 
 from server.ray_app.consensus.clock import FakeClock
 from server.ray_app.consensus.node import RaftNode, Role
@@ -107,6 +108,28 @@ def test_isolated_old_leader_cannot_commit_and_rejoins_as_follower():
     assert machines["n0"].applied_index == 2
     assert [event["msg_id"] for event in machines["n0"].log] == ["m1", "m3"]
     assert [event["msg_id"] for event in machines["n2"].log] == ["m1", "m3"]
+
+
+def test_every_pair_of_replica_crashes_leaves_a_writable_quorum():
+    for failed in combinations(("n0", "n1", "n2", "n3", "n4"), 2):
+        clock, network, nodes, machines = cluster()
+        elect_leader(clock, nodes)
+        assert nodes["n0"].propose(request_command("before"))["code"] == 200
+        nodes["n0"].send_heartbeats()
+
+        for node_id in failed:
+            network.unregister(node_id)
+        survivors = [node_id for node_id in nodes if node_id not in failed]
+        candidate = survivors[0]
+        clock.advance(1.0)
+        nodes[candidate].tick()
+
+        assert nodes[candidate].role is Role.LEADER, failed
+        command = request_command("after")
+        command["uid"] = "alice:after"
+        assert nodes[candidate].propose(command)["code"] == 200, failed
+        nodes[candidate].send_heartbeats()
+        assert all(machines[node_id].applied_index == 2 for node_id in survivors), failed
 
 
 def test_retried_msg_id_is_deduplicated_after_leader_change():

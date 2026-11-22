@@ -1,17 +1,14 @@
-# Build output
-/sdcald
-/bin/
-*.exe
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
 
-# Go
-/data/
-*.test
-coverage.out
+# Local project files
+context/
 
-# Node / Wails frontend
+# Node dependencies
 node_modules/
-client/frontend/dist/
-client/build/bin/
 
 # Local runtime state
 *.db

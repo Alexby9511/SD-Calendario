@@ -15,10 +15,27 @@ API1="http://localhost:8081"
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[31mFALLO: %s\033[0m\n' "$*" >&2; exit 1; }
 
-cleanup() { "$ROOT/deploy/down.sh" >/dev/null 2>&1 || true; }
+if [ -z "${SDCAL_API_TOKENS:-}" ]; then
+  fail "configura SDCAL_API_TOKENS antes de ejecutar la prueba"
+fi
+ALICE_TOKEN="$(python3 -c 'import json,os; value=json.loads(os.environ["SDCAL_API_TOKENS"])["alice"]; print(value[0] if isinstance(value,list) else value)')"
+AUTH_HEADER="Authorization: Bearer $ALICE_TOKEN"
+RUN_ID="chaos-$(date +%s)-$$"
+
+cleanup() {
+  docker start ray-head >/dev/null 2>&1 || true
+  for index in $(seq 1 "$WORKERS"); do
+    docker start "ray-worker-$index" >/dev/null 2>&1 || true
+  done
+  for index in $(seq 1 "$APIS"); do
+    docker start "sdcal-api-$index" >/dev/null 2>&1 || true
+  done
+}
 trap cleanup EXIT
 
-status_json() { curl -sS "$API1/v1/status" 2>/dev/null || echo '{}'; }
+status_json() {
+  curl -sS -H "$AUTH_HEADER" "$API1/v1/status" 2>/dev/null || echo '{}'
+}
 
 json_eval() {
   python3 -c "import json,sys; data=json.load(sys.stdin); print($1)" 2>/dev/null || echo ""
@@ -57,6 +74,7 @@ post_command() {
   local msg_id="$1"
   curl -sS -o /tmp/sdcal-chaos-response.json -w '%{http_code}' \
     -X POST "$API1/v1/commands" \
+    -H "$AUTH_HEADER" \
     -H 'Content-Type: application/json' \
     -d "{\"deployment_id\":\"dep1\",\"group_id\":\"team\",\"msg_id\":\"$msg_id\",\"type\":\"REQUEST\",\"uid\":\"alice:$msg_id\",\"sender_id\":\"alice\",\"key_id\":\"key1\",\"sequence\":1,\"seen_sequence\":0,\"client_sent_at\":\"2026-11-22T00:00:00Z\",\"payload\":{\"title\":\"Caos nivel 2\"}}"
 }
@@ -68,8 +86,10 @@ wait_for 60 have_five_replicas || fail "el clúster no tiene 5 réplicas"
 wait_for 60 have_leader || fail "el clúster no tiene líder"
 log "estado inicial: 5 réplicas, 1 líder, placement=$(placement_keys)"
 
+MSG_A="$RUN_ID-a"
+MSG_B="$RUN_ID-b"
 log "confirmando el comando A antes del caos"
-code="$(post_command cmd-a)"
+code="$(post_command "$MSG_A")"
 [ "$code" = "200" ] || fail "el comando A no se confirmó (HTTP $code)"
 grep -q '"deduplicated": *false' /tmp/sdcal-chaos-response.json \
   || fail "el comando A no se aplicó por primera vez"
@@ -83,11 +103,11 @@ wait_for 90 have_leader || fail "no hay líder con 3 réplicas"
 [ "$(leader_count)" = "1" ] || fail "split-brain: hay más de un líder"
 
 log "confirmando el comando B con 3/5 réplicas"
-code="$(post_command cmd-b)"
+code="$(post_command "$MSG_B")"
 [ "$code" = "200" ] || fail "el comando B no se confirmó sin quórum (HTTP $code)"
 
 log "comprobando que el comando A no se perdió"
-found="$(curl -sS "$API1/v1/kv/alice:cmd-a" | json_eval 'data["found"]')"
+found="$(curl -sS -H "$AUTH_HEADER" "$API1/v1/kv/alice:$MSG_A" | json_eval 'data["found"]')"
 [ "$found" = "True" ] || fail "el comando A desapareció del estado"
 
 log "volviendo a levantar los 2 nodos"
@@ -109,8 +129,9 @@ done
 log "reintentando el comando A en otra API (dedupe)"
 retry_code="$(curl -sS -o /tmp/sdcal-chaos-retry.json -w '%{http_code}' \
   -X POST "http://localhost:8082/v1/commands" \
+  -H "$AUTH_HEADER" \
   -H 'Content-Type: application/json' \
-  -d '{"deployment_id":"dep1","group_id":"team","msg_id":"cmd-a","type":"REQUEST","uid":"alice:cmd-a","sender_id":"alice","key_id":"key1","sequence":1,"seen_sequence":0,"client_sent_at":"2026-11-22T00:00:00Z","payload":{"title":"Caos nivel 2"}}')"
+  -d "{\"deployment_id\":\"dep1\",\"group_id\":\"team\",\"msg_id\":\"$MSG_A\",\"type\":\"REQUEST\",\"uid\":\"alice:$MSG_A\",\"sender_id\":\"alice\",\"key_id\":\"key1\",\"sequence\":1,\"seen_sequence\":0,\"client_sent_at\":\"2026-11-22T00:00:00Z\",\"payload\":{\"title\":\"Caos nivel 2\"}}")"
 [ "$retry_code" = "200" ] || fail "el reintento devolvió HTTP $retry_code"
 grep -q '"deduplicated": *true' /tmp/sdcal-chaos-retry.json \
   || fail "el reintento no se deduplicó"
