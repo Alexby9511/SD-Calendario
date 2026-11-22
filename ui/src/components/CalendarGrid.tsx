@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { AlertTriangle, Lock, ShieldCheck } from "lucide-react";
 import type { GroupEvent } from "../types/protocol";
 import { localConflict } from "../lib/conflicts";
@@ -12,11 +13,31 @@ interface Props {
   availability: Record<string, { start: string; end: string }[]>;
   showCancelled: boolean;
   onSelect: (event: GroupEvent) => void;
-  onQuickCreate?: (date: Date, hour: number) => void;
+  onQuickCreate?: (date: Date, start: string, end: string) => void;
   onNavigateDate?: (date: Date, view?: "Día" | "Mes") => void;
 }
 
 const hours = Array.from({ length: 24 }, (_, i) => i);
+const MINUTES_PER_DAY = 24 * 60;
+const SLOT_MINUTES = 15;
+const HOUR_HEIGHT = 64;
+const HEADER_HEIGHT = 62;
+
+interface DragSelection {
+  day: Date;
+  dayIndex: number;
+  anchorMinute: number;
+  quickMinute: number;
+  anchorClientY: number;
+  currentMinute: number;
+  moved: boolean;
+}
+
+interface PreviewSelection {
+  dayIndex: number;
+  startMinute: number;
+  endMinute: number;
+}
 
 function formatHour(hour: number) {
   const normalized = hour % 12 || 12;
@@ -27,6 +48,18 @@ function formatTime(date: Date) {
   const hoursValue = date.getHours();
   const normalized = hoursValue % 12 || 12;
   return `${normalized}:${String(date.getMinutes()).padStart(2, "0")} ${hoursValue < 12 ? "AM" : "PM"}`;
+}
+
+function dateTimeAt(day: Date, minutes: number) {
+  const date = new Date(day);
+  date.setHours(0, minutes, 0, 0);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function dateAt(day: Date, minutes: number) {
+  const date = new Date(day);
+  date.setHours(0, minutes, 0, 0);
+  return date;
 }
 
 function stateLabel(state: GroupEvent["state"]) {
@@ -40,7 +73,10 @@ function stateLabel(state: GroupEvent["state"]) {
 export function CalendarGrid(props: Props) {
   const [now, setNow] = useState(() => new Date());
   const [gridWidth, setGridWidth] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [preview, setPreview] = useState<PreviewSelection | null>(null);
   const gridRef = useRef<HTMLElement>(null);
+  const dragRef = useRef<DragSelection | null>(null);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(timer);
@@ -82,6 +118,107 @@ export function CalendarGrid(props: Props) {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [props.view, props.date.toISOString().slice(0, 10)]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    document.body.classList.add("calendar-dragging");
+
+    const updateSelection = (clientY: number, detectMovement = true) => {
+      const grid = gridRef.current;
+      const drag = dragRef.current;
+      if (!grid || !drag) return;
+      if (detectMovement && Math.abs(clientY - drag.anchorClientY) >= 8) {
+        drag.moved = true;
+      }
+      const gridRect = grid.getBoundingClientRect();
+      const contentY = clientY - gridRect.top + grid.scrollTop - HEADER_HEIGHT;
+      const minute = Math.max(
+        0,
+        Math.min(
+          MINUTES_PER_DAY - SLOT_MINUTES,
+          Math.floor(contentY / (HOUR_HEIGHT / 4)) * SLOT_MINUTES
+        )
+      );
+      drag.currentMinute = minute;
+      drag.moved ||= minute !== drag.anchorMinute;
+      setPreview({
+        dayIndex: drag.dayIndex,
+        startMinute: Math.min(drag.anchorMinute, minute),
+        endMinute: Math.min(
+          MINUTES_PER_DAY,
+          Math.max(drag.anchorMinute, minute) + SLOT_MINUTES
+        )
+      });
+    };
+
+    const onMouseMove = (event: MouseEvent) => updateSelection(event.clientY);
+    const onMouseUp = (event: MouseEvent) => {
+      updateSelection(event.clientY, false);
+      const drag = dragRef.current;
+      dragRef.current = null;
+      setPreview(null);
+      setIsDragging(false);
+      if (!drag || !props.onQuickCreate) return;
+
+      const startMinute = drag.moved
+        ? Math.min(drag.anchorMinute, drag.currentMinute)
+        : drag.quickMinute;
+      const endMinute = drag.moved
+        ? Math.min(
+            MINUTES_PER_DAY,
+            Math.max(drag.anchorMinute, drag.currentMinute) + SLOT_MINUTES
+          )
+        : Math.min(MINUTES_PER_DAY, drag.quickMinute + 60);
+      props.onQuickCreate(
+        drag.day,
+        dateTimeAt(drag.day, startMinute),
+        dateTimeAt(drag.day, endMinute)
+      );
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      document.body.style.userSelect = previousUserSelect;
+      document.body.classList.remove("calendar-dragging");
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [isDragging, props.onQuickCreate]);
+
+  const beginSelection = (event: ReactMouseEvent<HTMLDivElement>, day: Date, dayIndex: number, hour: number) => {
+    if (event.button !== 0 || (props.view !== "Día" && props.view !== "Semana")) return;
+    const grid = gridRef.current;
+    if (!grid) return;
+    event.preventDefault();
+    const gridRect = grid.getBoundingClientRect();
+    const contentY = event.clientY - gridRect.top + grid.scrollTop - HEADER_HEIGHT;
+    const anchorMinute = Math.max(
+      0,
+      Math.min(
+        MINUTES_PER_DAY - SLOT_MINUTES,
+        Math.floor(contentY / (HOUR_HEIGHT / 4)) * SLOT_MINUTES
+      )
+    );
+    const quickMinute = hour * 60;
+    dragRef.current = {
+      day,
+      dayIndex,
+      anchorMinute,
+      quickMinute,
+      anchorClientY: event.clientY,
+      currentMinute: anchorMinute,
+      moved: false
+    };
+    setPreview({
+      dayIndex,
+      startMinute: quickMinute,
+      endMinute: Math.min(MINUTES_PER_DAY, quickMinute + 60)
+    });
+    setIsDragging(true);
+  };
 
   if (props.view === "Agenda") {
     return (
@@ -194,7 +331,7 @@ export function CalendarGrid(props: Props) {
       {hours.map((hour) => (
         <div className="hour-row" key={hour}>
           <time>{formatHour(hour)}</time>
-          {days.map((day, dayIndex) => <div className="hour-cell" key={dayIndex} onDoubleClick={() => props.onQuickCreate?.(day, hour)}>
+          {days.map((day, dayIndex) => <div className="hour-cell" key={dayIndex} onMouseDown={(event) => beginSelection(event, day, dayIndex, hour)}>
             {props.busyUsers.map((user) => props.availability[user]?.map((window, i) =>
               window.start && window.end ? <span key={`${user}-${i}`} className={`busy-block busy-${user}`} /> : null
             ))}
@@ -233,6 +370,25 @@ export function CalendarGrid(props: Props) {
           </button>
         );
       })}
+      {preview && (
+        <div
+          className="calendar-event preview-event"
+          aria-hidden="true"
+          style={{
+            left: props.view === "Día"
+              ? 74
+              : 68 + ((gridWidth - 68) / 7) * preview.dayIndex + 6,
+            width: props.view === "Día"
+              ? undefined
+              : Math.max(60, (gridWidth - 68) / 7 - 12),
+            top: HEADER_HEIGHT + (preview.startMinute / 60) * HOUR_HEIGHT,
+            height: Math.max(16, ((preview.endMinute - preview.startMinute) / 60) * HOUR_HEIGHT)
+          }}
+        >
+          <strong>(Sin título)</strong>
+          <span>{formatTime(dateAt(days[preview.dayIndex], preview.startMinute))} – {formatTime(dateAt(days[preview.dayIndex], preview.endMinute))}</span>
+        </div>
+      )}
       {(() => {
         const todayIndex = days.findIndex((day) => day.toDateString() === now.toDateString());
         if (todayIndex < 0) return null;

@@ -4,6 +4,23 @@ export type EnvelopeType =
 
 export type PartStat = "ACCEPTED" | "DECLINED" | "TENTATIVE" | "NEEDS_ACTION" | "STALE_ACCEPTED" | "STALE_DECLINED" | "STALE_TENTATIVE" | "LATE_ACCEPTED" | "LATE_DECLINED" | "LATE_TENTATIVE";
 export type FsmState = "PROPOSED" | "CONFIRMED" | "NOT_CONFIRMED" | "EXPIRED" | "CANCELLED";
+export type SharedCalendarId = "personal" | "group" | (string & {});
+export type CalendarSharePermission = "freebusy" | "details" | "edit";
+
+export interface CalendarShare {
+  owner: string;
+  calendar: SharedCalendarId;
+  users: string[];
+  permission: CalendarSharePermission;
+}
+
+export interface CustomCalendar {
+  id: string;
+  name: string;
+  color: string;
+  visibility: "private" | "public";
+  visible: boolean;
+}
 
 export interface Envelope {
   deployment_id: string;
@@ -56,7 +73,10 @@ export interface GroupEvent {
     timezone?: string;
     confirmation_rule?: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER";
     quorum?: number;
-    privacy?: "private" | "busy" | "details";
+    privacy?: "private" | "public" | "busy" | "details";
+    visibility?: "private" | "public";
+    availability?: "busy" | "free";
+    hide_from_freebusy?: boolean;
     deadline_utc?: string;
   };
 }

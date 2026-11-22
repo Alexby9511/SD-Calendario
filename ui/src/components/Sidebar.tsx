@@ -1,6 +1,11 @@
 import { useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Plus, Search, User, Users } from "lucide-react";
-import type { GroupEvent } from "../types/protocol";
+import type { CSSProperties } from "react";
+import { CalendarDays, ChevronLeft, ChevronRight, Plus, Search, Share2, Trash2, User, Users, X } from "lucide-react";
+import type { CalendarShare, CalendarSharePermission, CustomCalendar, GroupEvent, SharedCalendarId } from "../types/protocol";
+import { ShareCalendarModal } from "./ShareCalendarModal";
+import { CreateCalendarModal } from "./CreateCalendarModal";
+
+const emptyUsers: string[] = [];
 
 interface Props {
   date: Date;
@@ -13,12 +18,23 @@ interface Props {
   onShowCancelled: (show: boolean) => void;
   view: "Día" | "Semana" | "Mes" | "Año" | "Agenda";
   onMoveMonth: (direction: -1 | 1) => void;
+  currentUser: string;
+  shareUsers: string[];
+  shares: CalendarShare[];
+  onSaveCalendarShare: (calendar: SharedCalendarId, users: string[], permission: CalendarSharePermission) => void;
+  customCalendars: CustomCalendar[];
+  onAddCustomCalendar: (calendar: { name: string; color: string; visibility: "private" | "public" }) => void;
+  onToggleCustomCalendar: (id: string) => void;
+  onDeleteCustomCalendar: (id: string) => void;
 }
 
 export function Sidebar(props: Props) {
   const [createMenu, setCreateMenu] = useState(false);
   const [personalVisible, setPersonalVisible] = useState(true);
   const [groupVisible, setGroupVisible] = useState(true);
+  const [shareCalendar, setShareCalendar] = useState<SharedCalendarId | null>(null);
+  const [createCalendarOpen, setCreateCalendarOpen] = useState(false);
+  const [deleteCalendar, setDeleteCalendar] = useState<CustomCalendar | null>(null);
   const year = props.date.getFullYear();
   const month = props.date.getMonth();
   const first = new Date(year, month, 1).getDay();
@@ -40,6 +56,14 @@ export function Sidebar(props: Props) {
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate();
   const sameMonth = year === today.getFullYear() && month === today.getMonth();
+  const existingShare = shareCalendar
+    ? props.shares.find((share) => share.owner === props.currentUser && share.calendar === shareCalendar)
+    : undefined;
+  const shareCalendarName = shareCalendar === "personal"
+    ? "Mi calendario personal"
+    : shareCalendar === "group"
+      ? "Reuniones de grupo"
+      : props.customCalendars.find((calendar) => calendar.id === shareCalendar)?.name ?? "Calendario";
 
   const toggleUser = (user: string) => {
     props.onBusyUsers(
@@ -96,9 +120,76 @@ export function Sidebar(props: Props) {
       </section>
 
       <section className="calendar-layers">
-        <h3>Capas</h3>
-        <label><input type="checkbox" checked={personalVisible} onChange={(e) => setPersonalVisible(e.target.checked)} /> Mi calendario personal</label>
-        <label><input type="checkbox" checked={groupVisible} onChange={(e) => setGroupVisible(e.target.checked)} /> Reuniones de grupo</label>
+        <div className="calendar-layers-heading">
+          <h3>Capas</h3>
+          <button
+            type="button"
+            className="add-calendar-button"
+            aria-label="Crear nuevo calendario"
+            title="Crear nuevo calendario"
+            onClick={() => setCreateCalendarOpen(true)}
+          >
+            <Plus size={15} />
+          </button>
+        </div>
+        <div className="calendar-layer-row">
+          <label><input type="checkbox" checked={personalVisible} onChange={(e) => setPersonalVisible(e.target.checked)} /> Mi calendario personal</label>
+          <button
+            type="button"
+            className={`share-calendar-button ${existingShare && shareCalendar === "personal" ? "has-shares" : ""}`}
+            aria-label="Compartir Mi calendario personal"
+            title="Compartir Mi calendario personal"
+            onClick={() => setShareCalendar("personal")}
+          ><Share2 size={15} /></button>
+        </div>
+        <div className="calendar-layer-row">
+          <label><input type="checkbox" checked={groupVisible} onChange={(e) => setGroupVisible(e.target.checked)} /> Reuniones de grupo</label>
+          <button
+            type="button"
+            className={`share-calendar-button ${props.shares.some((share) => share.owner === props.currentUser && share.calendar === "group") ? "has-shares" : ""}`}
+            aria-label="Compartir Reuniones de grupo"
+            title="Compartir Reuniones de grupo"
+            onClick={() => setShareCalendar("group")}
+          ><Share2 size={15} /></button>
+        </div>
+        {props.customCalendars.map((calendar) => (
+          <div className="calendar-layer-row custom-calendar-row" key={calendar.id}>
+            <label>
+              <input
+                type="checkbox"
+                checked={calendar.visible}
+                onChange={() => props.onToggleCustomCalendar(calendar.id)}
+                style={{
+                  "--calendar-color": calendar.color,
+                  "--calendar-check-color": "#ffffff",
+                  borderColor: calendar.color,
+                  backgroundColor: calendar.visible ? calendar.color : "transparent"
+                } as CSSProperties}
+              />
+              {calendar.name}
+            </label>
+            <div className="custom-calendar-actions">
+              <button
+                type="button"
+                className={`share-calendar-button ${props.shares.some((share) => share.owner === props.currentUser && share.calendar === calendar.id) ? "has-shares" : ""}`}
+                aria-label={`Compartir ${calendar.name}`}
+                title={`Compartir ${calendar.name}`}
+                onClick={() => setShareCalendar(calendar.id)}
+              >
+                <Share2 size={15} />
+              </button>
+              <button
+                type="button"
+                className="delete-calendar-button"
+                aria-label={`Eliminar ${calendar.name}`}
+                title={`Eliminar ${calendar.name}`}
+                onClick={() => setDeleteCalendar(calendar)}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+        ))}
         <label><input type="checkbox" checked={props.showCancelled} onChange={(e) => props.onShowCancelled(e.target.checked)} /> Mostrar cancelados / expirados</label>
       </section>
 
@@ -121,6 +212,57 @@ export function Sidebar(props: Props) {
           </button>
         ))}
       </section>
+      <ShareCalendarModal
+        open={shareCalendar !== null}
+        calendar={shareCalendar}
+        calendarName={shareCalendarName}
+        currentUser={props.currentUser}
+        users={props.shareUsers}
+        initialUsers={existingShare?.users ?? emptyUsers}
+        initialPermission={existingShare?.permission ?? "freebusy"}
+        onClose={() => setShareCalendar(null)}
+        onSave={(users, permission) => {
+          if (!shareCalendar) return;
+          props.onSaveCalendarShare(shareCalendar, users, permission);
+          setShareCalendar(null);
+        }}
+      />
+      <CreateCalendarModal
+        open={createCalendarOpen}
+        onClose={() => setCreateCalendarOpen(false)}
+        onSave={(calendar) => {
+          props.onAddCustomCalendar(calendar);
+          setCreateCalendarOpen(false);
+        }}
+      />
+      {deleteCalendar && (
+        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDeleteCalendar(null)}>
+          <section className="delete-calendar-modal" role="dialog" aria-modal="true" aria-labelledby="delete-calendar-title">
+            <header>
+              <h2 id="delete-calendar-title">Eliminar calendario</h2>
+              <button className="icon-button" type="button" aria-label="Cerrar" onClick={() => setDeleteCalendar(null)}>
+                <X size={18} />
+              </button>
+            </header>
+            <div className="delete-calendar-body">
+              ¿Eliminar <strong>{deleteCalendar.name}</strong>? Esta acción quitará la capa de tu lista.
+            </div>
+            <footer>
+              <button className="subtle-button" type="button" onClick={() => setDeleteCalendar(null)}>Cancelar</button>
+              <button
+                className="danger-button"
+                type="button"
+                onClick={() => {
+                  props.onDeleteCustomCalendar(deleteCalendar.id);
+                  setDeleteCalendar(null);
+                }}
+              >
+                Eliminar
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </aside>
   );
 }

@@ -3,6 +3,7 @@ import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
 import { CalendarGrid } from "./components/CalendarGrid";
 import { EventModal } from "./components/EventModal";
+import type { CalendarShare, CalendarSharePermission, CustomCalendar, SharedCalendarId } from "./types/protocol";
 import { EventDetailModal } from "./components/EventDetailModal";
 import { DistributedInspector } from "./components/DistributedInspector";
 import { ulid } from "./lib/canonical";
@@ -12,6 +13,8 @@ import { applyCommand, availability, getStatus, sync as syncServer } from "./lib
 import type { Envelope, EnvelopeType, GroupEvent, SyncEntry } from "./types/protocol";
 
 const EVENTS_KEY = "sd-calendar-events";
+const SHARES_KEY = "sd-calendar-shares";
+const CUSTOM_CALENDARS_KEY = "sd-calendar-custom-calendars";
 
 export default function App() {
   const [user, setUser] = useState("alice");
@@ -24,6 +27,7 @@ export default function App() {
   const [online, setOnline] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createMode, setCreateMode] = useState<"personal" | "group">("personal");
+  const [createRange, setCreateRange] = useState<{ start: string; end: string } | null>(null);
   const [detailEvent, setDetailEvent] = useState<GroupEvent | null>(null);
   const [showCancelled, setShowCancelled] = useState(false);
   const [busyUsers, setBusyUsers] = useState(["bob"]);
@@ -31,6 +35,22 @@ export default function App() {
   const [events, setEvents] = useState<GroupEvent[]>(() => {
     try {
       return JSON.parse(localStorage.getItem(EVENTS_KEY) ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [calendarShares, setCalendarShares] = useState<CalendarShare[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SHARES_KEY) ?? "[]");
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
+  const [customCalendars, setCustomCalendars] = useState<CustomCalendar[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CUSTOM_CALENDARS_KEY) ?? "[]");
+      return Array.isArray(saved) ? saved : [];
     } catch {
       return [];
     }
@@ -47,6 +67,15 @@ export default function App() {
   const [attendance, setAttendance] = useState<Record<string, string>>({ bob: "ACCEPTED", carol: "NEEDS_ACTION" });
 
   const personalEvents = useMemo(() => events.filter((event) => event.kind === "personal"), [events]);
+  const shareUsers = useMemo(
+    () => Array.from(new Set([
+      "bob",
+      "carol",
+      ...Object.keys(availabilityMap),
+      ...events.flatMap((event) => [event.organizer, ...event.participants])
+    ])).filter((candidate) => candidate !== user),
+    [availabilityMap, events, user]
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -56,6 +85,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
   }, [events]);
+
+  useEffect(() => {
+    localStorage.setItem(SHARES_KEY, JSON.stringify(calendarShares));
+  }, [calendarShares]);
+
+  useEffect(() => {
+    localStorage.setItem(CUSTOM_CALENDARS_KEY, JSON.stringify(customCalendars));
+  }, [customCalendars]);
 
   useEffect(() => {
     ensureDeviceKeys();
@@ -91,7 +128,51 @@ export default function App() {
 
   const openCreate = (mode: "personal" | "group" = "personal") => {
     setCreateMode(mode);
+    setCreateRange(null);
     setCreateOpen(true);
+  };
+
+  const saveCalendarShare = (
+    calendar: SharedCalendarId,
+    users: string[],
+    permission: CalendarSharePermission
+  ) => {
+    setCalendarShares((current) => {
+      const withoutCurrent = current.filter(
+        (share) => share.owner !== user || share.calendar !== calendar
+      );
+      return users.length
+        ? [...withoutCurrent, { owner: user, calendar, users, permission }]
+        : withoutCurrent;
+    });
+  };
+
+  const addCustomCalendar = (calendar: { name: string; color: string; visibility: "private" | "public" }) => {
+    setCustomCalendars((current) => [
+      ...current,
+      {
+        id: ulid(),
+        name: calendar.name,
+        color: calendar.color,
+        visibility: calendar.visibility,
+        visible: true
+      }
+    ]);
+  };
+
+  const toggleCustomCalendar = (id: string) => {
+    setCustomCalendars((current) =>
+      current.map((calendar) =>
+        calendar.id === id ? { ...calendar, visible: !calendar.visible } : calendar
+      )
+    );
+  };
+
+  const deleteCustomCalendar = (id: string) => {
+    setCustomCalendars((current) => current.filter((calendar) => calendar.id !== id));
+    setCalendarShares((current) =>
+      current.filter((share) => share.owner !== user || share.calendar !== id)
+    );
   };
 
   const buildEnvelope = (type: EnvelopeType, uid: string, sequence: number, payload: Record<string, unknown>): Promise<Envelope> =>
@@ -139,6 +220,9 @@ export default function App() {
                 start: payload.start,
                 end: payload.end,
                 privacy: payload.privacy,
+                visibility: payload.visibility,
+                availability: payload.availability,
+                hide_from_freebusy: payload.hide_from_freebusy,
                 confirmation_rule: payload.confirmation_rule,
                 quorum: payload.quorum
               }
@@ -177,7 +261,7 @@ export default function App() {
     if (!offline) await syncNow();
   };
 
-  const savePersonal = async (value: { title: string; start: string; end: string; tzid: string; privacy: "private" | "busy" | "details"; hide: boolean }) => {
+  const savePersonal = async (value: { title: string; start: string; end: string; tzid: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean }) => {
     const uid = `${user}:personal:${ulid()}`;
     const envelope = await buildEnvelope("REQUEST", uid, 1, {
       kind: "personal",
@@ -186,6 +270,8 @@ export default function App() {
       end: value.end,
       tzid: value.tzid,
       privacy: value.privacy,
+      visibility: value.visibility,
+      availability: value.availability,
       hide_from_freebusy: value.hide
     });
     setEvents((current) => [...current, {
@@ -195,7 +281,15 @@ export default function App() {
       organizer: user,
       kind: "personal",
       participants: [],
-      payload: { title: value.title, start: value.start, end: value.end, privacy: value.privacy }
+      payload: {
+        title: value.title,
+        start: value.start,
+        end: value.end,
+        privacy: value.privacy,
+        visibility: value.visibility,
+        availability: value.availability,
+        hide_from_freebusy: value.hide
+      }
     }]);
     await queueEnvelope(envelope);
     if (!value.hide) {
@@ -309,6 +403,12 @@ export default function App() {
         <Sidebar date={date} events={events} busyUsers={busyUsers} onBusyUsers={setBusyUsers}
           onCreate={openCreate} onSelectEvent={setDetailEvent}
           showCancelled={showCancelled} onShowCancelled={setShowCancelled} view={view}
+          currentUser={user} shareUsers={shareUsers} shares={calendarShares}
+          onSaveCalendarShare={saveCalendarShare}
+          customCalendars={customCalendars}
+          onAddCustomCalendar={addCustomCalendar}
+          onToggleCustomCalendar={toggleCustomCalendar}
+          onDeleteCustomCalendar={deleteCustomCalendar}
           onMoveMonth={(direction) => setDate((current) => {
             const next = new Date(current);
             const day = next.getDate();
@@ -321,7 +421,11 @@ export default function App() {
         <div className={`calendar-transition calendar-${navDirection}`} key={`${view}-${date.toISOString().slice(0, 10)}`}>
           <CalendarGrid view={view} date={date} events={events} personalEvents={personalEvents}
             busyUsers={busyUsers} availability={availabilityMap} showCancelled={showCancelled}
-            onSelect={setDetailEvent} onQuickCreate={() => openCreate()}
+              onSelect={setDetailEvent} onQuickCreate={(_day, start, end) => {
+                setCreateMode("personal");
+                setCreateRange({ start, end });
+                setCreateOpen(true);
+              }}
             onNavigateDate={(nextDate, nextView = "Día") => {
               setNavDirection("next");
               setDate(nextDate);
@@ -331,7 +435,7 @@ export default function App() {
       </div>
       <DistributedInspector open={inspectorOpen} outbox={outbox} entries={entries} cursor={cursor}
         onToggle={() => setInspectorOpen((open) => !open)} />
-      <EventModal open={createOpen} initialMode={createMode} user={user} availability={availabilityMap}
+      <EventModal open={createOpen} initialMode={createMode} initialStart={createRange?.start} initialEnd={createRange?.end} user={user} availability={availabilityMap}
         onClose={() => setCreateOpen(false)} onSavePersonal={savePersonal} onSaveGroup={saveGroup} />
       <EventDetailModal event={detailEvent} attendance={attendance}
         onClose={() => setDetailEvent(null)} onReply={sendReply}
