@@ -40,6 +40,7 @@ def personal_command(msg_id, sender, uid, start, end):
 
 @pytest.fixture
 def client(monkeypatch):
+    monkeypatch.setenv("SDCAL_AUTH_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
     monkeypatch.setenv(
         "SDCAL_API_TOKENS",
         json.dumps({"alice": "a" * 40, "bob": "b" * 40}),
@@ -82,6 +83,79 @@ def test_token_registry_reads_current_environment(monkeypatch):
 
     monkeypatch.setenv("SDCAL_API_TOKENS", json.dumps({"bob": second_token}))
     assert TokenRegistry.from_environment().authenticate(second_token) == "bob"
+
+
+def test_registration_login_and_calendar_data_use_the_authenticated_account(client):
+    registered = client.post(
+        "/v1/auth/register",
+        json={"user_id": "New_User", "password": "secure password"},
+    )
+    assert registered.status_code == 201
+    credentials = registered.json()
+    assert credentials["user_id"] == "new_user"
+    token_headers = {"Authorization": f"Bearer {credentials['access_token']}"}
+
+    assert client.get("/v1/auth/me", headers=token_headers).json() == {
+        "user_id": "new_user"
+    }
+    created = client.post(
+        "/v1/commands",
+        json=personal_command(
+            "01J00000000000000000000021",
+            "new_user",
+            "new_user:01J00000000000000000000022",
+            "2026-11-21T10:00:00Z",
+            "2026-11-21T11:00:00Z",
+        ),
+        headers=token_headers,
+    )
+    assert created.status_code == 200
+    assert client.get("/v1/kv/*", headers=token_headers).json().get("accounts") is None
+
+    duplicate = client.post(
+        "/v1/auth/register",
+        json={"user_id": "NEW_USER", "password": "different password"},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["reason"] == "user_id_taken"
+
+    assert client.post(
+        "/v1/auth/login",
+        json={"user_id": "new_user", "password": "wrong password"},
+    ).status_code == 401
+    signed_in = client.post(
+        "/v1/auth/login",
+        json={"user_id": "NEW_USER", "password": "secure password"},
+    )
+    assert signed_in.status_code == 200
+    assert signed_in.json()["user_id"] == "new_user"
+
+
+def test_registration_validates_identifier_and_password(client):
+    invalid_id = client.post(
+        "/v1/auth/register",
+        json={"user_id": "a!", "password": "secure password"},
+    )
+    assert invalid_id.status_code == 422
+    assert invalid_id.json()["detail"]["reason"] == "invalid_user_id"
+
+    weak_password = client.post(
+        "/v1/auth/register",
+        json={"user_id": "valid_user", "password": "short"},
+    )
+    assert weak_password.status_code == 422
+    assert weak_password.json()["detail"]["reason"] == "weak_password"
+
+
+def test_calendar_commands_cannot_submit_internal_account_operations(client):
+    response = client.post(
+        "/v1/commands",
+        json={"internal_type": "REGISTER_ACCOUNT", "user_id": "another_user"},
+        headers=headers(),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "unsupported_command"
 
 
 def test_local_availability_timeout_returns_503(client, monkeypatch):

@@ -2,6 +2,50 @@ import type { Envelope, CommandResponse, SyncPage } from "../types/protocol";
 
 const API_BASE = "";
 
+export interface AuthSession {
+  user_id: string;
+  access_token: string;
+  token_type: "bearer";
+}
+
+async function authRequest(path: string, user_id: string, password: string): Promise<AuthSession> {
+  const response = await fetch(`${API_BASE}/v1/auth/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, password })
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const reason = data.detail?.reason;
+    const messages: Record<string, string> = {
+      invalid_user_id: "Usa un identificador de 3 a 32 caracteres: letras, números, punto, guion o guion bajo.",
+      weak_password: "La contraseña debe tener al menos 8 caracteres.",
+      user_id_taken: "Ese identificador ya está en uso.",
+      invalid_credentials: "Identificador o contraseña incorrectos.",
+      authentication_not_configured: "El backend todavía no está configurado para autenticar usuarios."
+    };
+    throw new Error(messages[reason] ?? "No se pudo completar la autenticación. Inténtalo de nuevo.");
+  }
+  return data as AuthSession;
+}
+
+export function register(user_id: string, password: string): Promise<AuthSession> {
+  return authRequest("register", user_id, password);
+}
+
+export function login(user_id: string, password: string): Promise<AuthSession> {
+  return authRequest("login", user_id, password);
+}
+
+export async function validateSession(token: string): Promise<string> {
+  const response = await fetch(`${API_BASE}/v1/auth/me`, {
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw new Error("Tu sesión venció. Inicia sesión de nuevo.");
+  const data = await response.json() as { user_id: string };
+  return data.user_id;
+}
+
 function authHeaders(token: string): HeadersInit {
   if (!token.trim()) throw new Error("Configura el token Bearer de este usuario");
   return { Authorization: `Bearer ${token.trim()}` };

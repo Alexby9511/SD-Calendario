@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { AlertTriangle, Lock, ShieldCheck } from "lucide-react";
-import type { GroupEvent } from "../types/protocol";
+import { Lock, ShieldCheck } from "lucide-react";
+import type { CustomCalendar, GroupEvent } from "../types/protocol";
 import { localConflict } from "../lib/conflicts";
+import { isEventCalendarVisible } from "../lib/calendars";
 
 interface Props {
   view: "Día" | "Semana" | "Mes" | "Año" | "Agenda";
   date: Date;
   events: GroupEvent[];
   personalEvents: GroupEvent[];
+  customCalendars: CustomCalendar[];
   busyUsers: string[];
   personalVisible: boolean;
   groupVisible: boolean;
@@ -93,7 +95,7 @@ export function CalendarGrid(props: Props) {
     return () => observer.disconnect();
   }, [props.view]);
   const visibleEvents = props.events.filter((event) =>
-    (event.kind === "personal" ? props.personalVisible : props.groupVisible)
+    isEventCalendarVisible(event, props.customCalendars, props.personalVisible, props.groupVisible)
     && (props.showCancelled || event.state !== "CANCELLED")
   );
   const days = (props.view === "Día" ? [0] : [0, 1, 2, 3, 4, 5, 6]).map((i) => {
@@ -341,18 +343,22 @@ export function CalendarGrid(props: Props) {
       ))}
       {visibleEvents.map((event, i) => {
         const start = event.payload.start ? new Date(event.payload.start.replace(" ", "T")) : null;
+        const end = event.payload.end ? new Date(event.payload.end.replace(" ", "T")) : null;
         const dayIndex = start
           ? days.findIndex((day) => day.toDateString() === start.toDateString())
           : -1;
         if (dayIndex < 0) return null;
         const minutes = start ? start.getHours() * 60 + start.getMinutes() : 9 * 60;
         const top = 62 + (minutes / 60) * 64;
+        const durationMinutes = start && end && end > start
+          ? (end.getTime() - start.getTime()) / 60_000
+          : 60;
         const conflict = localConflict(event, props.personalEvents);
         return (
           <button
             key={event.uid}
             onClick={() => props.onSelect(event)}
-            className={`calendar-event state-${event.state.toLowerCase()} ${event.kind === "personal" ? "personal-event" : ""}`}
+            className={`calendar-event state-${event.state.toLowerCase()} ${event.kind === "personal" ? "personal-event" : ""}${conflict ? " has-conflict" : ""}`}
             style={{
               left: props.view === "Día"
                 ? 74
@@ -360,14 +366,15 @@ export function CalendarGrid(props: Props) {
               width: props.view === "Día"
                 ? undefined
                 : Math.max(60, (gridWidth - 68) / 7 - 12),
-              top
+              top,
+              height: (durationMinutes / 60) * HOUR_HEIGHT,
+              minHeight: 0
             }}
           >
             {event.kind === "personal" && <Lock size={12} />}
             {event.state === "CONFIRMED" && <ShieldCheck size={12} />}
             <strong>{event.payload.title ?? "Evento"}</strong>
             <span>{start ? formatTime(start) : "9:00 AM"} · {stateLabel(event.state)}</span>
-            {conflict && <em><AlertTriangle size={11} /> Conflicto de horario</em>}
           </button>
         );
       })}

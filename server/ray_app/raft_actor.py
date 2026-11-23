@@ -43,6 +43,9 @@ class ReplicatedState(Protocol):
     def restore(self, data: bytes) -> None:
         """Replace the whole state from a snapshot."""
 
+    def accounts_snapshot(self) -> Dict[str, Dict[str, str]]:
+        """Return account credential hashes for API authentication."""
+
     def availability(
         self,
         users: Optional[List[str]] = None,
@@ -158,6 +161,9 @@ class RaftReplica:
         if not include_log:
             snapshot.pop("log", None)
         return snapshot
+
+    def accounts_snapshot(self) -> Dict[str, Dict[str, str]]:
+        return self.state.accounts_snapshot()
 
     def availability(
         self,

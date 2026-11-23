@@ -14,12 +14,26 @@ class FakeCluster:
         self.result = result
         self.error = error
         self.proposed = []
+        self.accounts = {}
 
     def propose(self, command):
         self.proposed.append(command)
         if self.error is not None:
             raise self.error
+        if command.get("internal_type") == "REGISTER_ACCOUNT":
+            self.accounts[command["user_id"]] = {
+                "password_salt": command["password_salt"],
+                "password_hash": command["password_hash"],
+            }
+            return {
+                "code": 200,
+                "applied_index": 1,
+                "result": {"user_id": command["user_id"]},
+            }
         return self.result
+
+    def accounts_snapshot(self):
+        return self.accounts
 
     def status(self):
         return {
@@ -94,6 +108,7 @@ def command(msg_id="01J00000000000000000000002"):
 
 @pytest.fixture
 def client(monkeypatch):
+    monkeypatch.setenv("SDCAL_AUTH_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
     monkeypatch.setenv(
         "SDCAL_API_TOKENS",
         json.dumps({"alice": "a" * 40, "bob": "b" * 40}),
@@ -118,6 +133,26 @@ def test_command_is_forwarded_to_the_cluster(client):
     assert response.status_code == 200
     assert response.json()["code"] == 200
     assert cluster.proposed == [command()]
+
+
+def test_registration_and_login_use_the_replicated_account_state(client):
+    cluster = FakeCluster()
+    api.set_cluster(cluster)
+
+    registered = client.post(
+        "/v1/auth/register",
+        json={"user_id": "cluster_user", "password": "secure password"},
+    )
+    assert registered.status_code == 201
+    assert cluster.proposed[0]["internal_type"] == "REGISTER_ACCOUNT"
+    assert "password" not in cluster.proposed[0]
+
+    signed_in = client.post(
+        "/v1/auth/login",
+        json={"user_id": "cluster_user", "password": "secure password"},
+    )
+    assert signed_in.status_code == 200
+    assert signed_in.json()["user_id"] == "cluster_user"
 
 
 def test_command_without_leader_returns_503(client):

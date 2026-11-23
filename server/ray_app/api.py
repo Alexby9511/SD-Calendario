@@ -17,7 +17,14 @@ if ray is not None:
         _QUERY_TIMEOUT_ERRORS += (ray_timeout_error,)
 
 from .coordinator import Coordinator, CoordinatorActor
-from .auth import AuthenticationNotConfigured, TokenRegistry
+from .auth import (
+    AuthenticationNotConfigured,
+    TokenRegistry,
+    TokenSigner,
+    hash_password,
+    normalize_user_id,
+    verify_password,
+)
 from .raft_cluster import NoLeaderError, RaftCluster
 
 
@@ -67,19 +74,30 @@ def authenticated_user(authorization: Optional[str] = Header(default=None)) -> s
     if not separator or scheme.lower() != "bearer" or not token.strip():
         raise HTTPException(status_code=401, detail={"reason": "invalid_authorization"})
     try:
-        registry = TokenRegistry.from_environment()
+        signer = TokenSigner.from_environment()
+    except AuthenticationNotConfigured:
+        signer = None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"reason": "authentication_configuration_invalid"},
+        ) from exc
+    if signer is not None:
+        try:
+            return signer.authenticate(token.strip())
+        except ValueError:
+            pass
+
+    try:
+        return TokenRegistry.from_environment().authenticate(token.strip())
     except AuthenticationNotConfigured as exc:
         raise HTTPException(
             status_code=503, detail={"reason": "authentication_not_configured"}
         ) from exc
     except ValueError as exc:
         raise HTTPException(
-            status_code=503, detail={"reason": "authentication_configuration_invalid"}
+            status_code=401, detail={"reason": "invalid_bearer_token"}
         ) from exc
-    try:
-        return registry.authenticate(token.strip())
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail={"reason": "invalid_bearer_token"}) from exc
 
 
 def _can_view_event(
@@ -121,13 +139,116 @@ def _query_timeout(exc: Exception) -> HTTPException:
 app = FastAPI(title="SD Calendario sobre Ray") if FastAPI is not None else None
 
 
+def _account_snapshot() -> Dict[str, Any]:
+    cluster = get_cluster()
+    try:
+        if cluster is not None:
+            return cluster.accounts_snapshot()
+        return resolve(call_coordinator("accounts_snapshot"))
+    except NoLeaderError as exc:
+        raise HTTPException(
+            status_code=503, detail={"reason": str(exc)}
+        ) from exc
+    except _QUERY_TIMEOUT_ERRORS as exc:
+        raise _query_timeout(exc) from exc
+
+
 if app is not None:
+    @app.post("/v1/auth/register", status_code=201)
+    def register_account(credentials: Dict[str, Any]):
+        try:
+            signer = TokenSigner.from_environment()
+        except AuthenticationNotConfigured as exc:
+            raise HTTPException(
+                status_code=503, detail={"reason": "authentication_not_configured"}
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"reason": "authentication_configuration_invalid"},
+            ) from exc
+        try:
+            user_id = normalize_user_id(credentials.get("user_id"))
+            password = hash_password(credentials.get("password"))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail={"reason": str(exc)}
+            ) from exc
+
+        command = {
+            "internal_type": "REGISTER_ACCOUNT",
+            "user_id": user_id,
+            **password,
+        }
+        cluster = get_cluster()
+        if cluster is not None:
+            try:
+                result = cluster.propose(command)
+            except NoLeaderError as exc:
+                raise HTTPException(
+                    status_code=503, detail={"reason": str(exc)}
+                ) from exc
+            if result is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"reason": "raft: account not committed (no quorum)"},
+                )
+        else:
+            result = resolve(call_coordinator("apply", command))
+
+        code = int(result["code"])
+        if code != 200:
+            raise HTTPException(status_code=code, detail=result["result"])
+        return {
+            "access_token": signer.issue(user_id),
+            "token_type": "bearer",
+            "user_id": user_id,
+        }
+
+    @app.post("/v1/auth/login")
+    def login(credentials: Dict[str, Any]):
+        try:
+            signer = TokenSigner.from_environment()
+        except AuthenticationNotConfigured as exc:
+            raise HTTPException(
+                status_code=503, detail={"reason": "authentication_not_configured"}
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"reason": "authentication_configuration_invalid"},
+            ) from exc
+        try:
+            user_id = normalize_user_id(credentials.get("user_id"))
+        except ValueError:
+            user_id = ""
+        account = _account_snapshot().get(user_id)
+        if account is None or not verify_password(
+            credentials.get("password"), account
+        ):
+            raise HTTPException(
+                status_code=401, detail={"reason": "invalid_credentials"}
+            )
+        return {
+            "access_token": signer.issue(user_id),
+            "token_type": "bearer",
+            "user_id": user_id,
+        }
+
+    @app.get("/v1/auth/me")
+    def current_account(user_id: str = Depends(authenticated_user)):
+        return {"user_id": user_id}
+
     @app.post("/v1/commands")
     @app.post("/v1/command")
     def apply_command(
         command: Dict[str, Any],
         user_id: str = Depends(authenticated_user),
     ):
+        if "internal_type" in command:
+            raise HTTPException(
+                status_code=422, detail={"reason": "unsupported_command"}
+            )
         if command.get("sender_id") != user_id:
             raise HTTPException(
                 status_code=403, detail={"reason": "sender_identity_mismatch"}
@@ -167,7 +288,7 @@ if app is not None:
     @app.get("/ready")
     def ready():
         try:
-            TokenRegistry.from_environment()
+            TokenSigner.from_environment()
         except AuthenticationNotConfigured as exc:
             raise HTTPException(
                 status_code=503,

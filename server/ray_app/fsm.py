@@ -1,4 +1,5 @@
 import copy
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,7 @@ class CalendarFSM:
     """Deterministic, in-memory state machine. No clocks or randomness."""
 
     def __init__(self) -> None:
+        self.accounts: Dict[str, Dict[str, str]] = {}
         self.events: Dict[str, Dict[str, Any]] = {}
         self.attendance: Dict[str, Dict[str, str]] = {}
         self.counters: Dict[str, Dict[str, Any]] = {}
@@ -21,6 +23,9 @@ class CalendarFSM:
         self.applied_index = 0
 
     def apply(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        if data.get("internal_type") == "REGISTER_ACCOUNT":
+            return self._register_account(data)
+
         envelope = Envelope.from_dict(data)
         envelope.validate()
 
@@ -82,6 +87,53 @@ class CalendarFSM:
                 "index": self.applied_index,
                 "msg_id": msg_id,
                 "command": copy.deepcopy(data),
+                "result": copy.deepcopy(result),
+            }
+        )
+        return {
+            "code": 200,
+            "deduplicated": False,
+            "applied_index": self.applied_index,
+            "result": result,
+        }
+
+    def _register_account(self, command: Dict[str, Any]) -> Dict[str, Any]:
+        user_id = command.get("user_id")
+        password_salt = command.get("password_salt")
+        password_hash = command.get("password_hash")
+        if (
+            not isinstance(user_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9_.-]{2,31}", user_id) is None
+            or not isinstance(password_salt, str)
+            or re.fullmatch(r"[0-9a-f]{32}", password_salt) is None
+            or not isinstance(password_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", password_hash) is None
+        ):
+            return {
+                "code": 422,
+                "deduplicated": False,
+                "applied_index": self.applied_index,
+                "result": {"reason": "invalid_account"},
+            }
+        if user_id in self.accounts:
+            return {
+                "code": 409,
+                "deduplicated": False,
+                "applied_index": self.applied_index,
+                "result": {"reason": "user_id_taken"},
+            }
+
+        self.accounts[user_id] = {
+            "password_salt": password_salt,
+            "password_hash": password_hash,
+        }
+        self.applied_index += 1
+        result = {"ok": True, "user_id": user_id}
+        self.log.append(
+            {
+                "index": self.applied_index,
+                "msg_id": f"register:{user_id}",
+                "command": copy.deepcopy(command),
                 "result": copy.deepcopy(result),
             }
         )
@@ -829,6 +881,7 @@ class CalendarFSM:
 
     def snapshot(self, include_log: bool = True) -> Dict[str, Any]:
         snapshot = {
+            "accounts": copy.deepcopy(self.accounts),
             "events": copy.deepcopy(self.events),
             "attendance": copy.deepcopy(self.attendance),
             "counters": copy.deepcopy(self.counters),
@@ -852,9 +905,13 @@ class CalendarFSM:
             "applied_index": self.applied_index,
         }
 
+    def accounts_snapshot(self) -> Dict[str, Dict[str, str]]:
+        return copy.deepcopy(self.accounts)
+
     @classmethod
     def from_snapshot(cls, snapshot: Dict[str, Any]) -> "CalendarFSM":
         fsm = cls()
+        fsm.accounts = copy.deepcopy(snapshot.get("accounts", {}))
         fsm.events = copy.deepcopy(snapshot.get("events", {}))
         fsm.attendance = copy.deepcopy(snapshot.get("attendance", {}))
         fsm.counters = copy.deepcopy(snapshot.get("counters", {}))

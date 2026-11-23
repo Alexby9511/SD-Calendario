@@ -51,6 +51,9 @@ class CalendarState:
         """Return the domain projection without its sync history."""
         return self.fsm.read_snapshot()
 
+    def accounts_snapshot(self) -> Dict[str, Dict[str, str]]:
+        return self.fsm.accounts_snapshot()
+
     def restore(self, data: bytes) -> None:
         self.fsm = CalendarFSM.from_snapshot(
             json.loads(data.decode("utf-8"))

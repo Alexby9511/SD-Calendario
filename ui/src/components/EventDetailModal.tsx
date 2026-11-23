@@ -2,6 +2,30 @@ import { useState } from "react";
 import { Check, CircleX, Clock3, RotateCcw, X } from "lucide-react";
 import type { GroupEvent } from "../types/protocol";
 
+const dateFormatter = new Intl.DateTimeFormat("es", {
+  day: "numeric",
+  month: "short",
+  year: "numeric"
+});
+
+const timeFormatter = new Intl.DateTimeFormat("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true
+});
+
+function formatDateTime(value?: string) {
+  if (!value) return "Sin fecha";
+  const date = new Date(value.replace(" ", "T"));
+  return Number.isNaN(date.getTime())
+    ? "Fecha no válida"
+    : `${dateFormatter.format(date)}, ${timeFormatter.format(date)}`;
+}
+
+function formatDateTimeRange(start?: string, end?: string) {
+  return `${formatDateTime(start)} – ${formatDateTime(end)}`;
+}
+
 interface Props {
   event: GroupEvent | null;
   attendance: Record<string, string>;
@@ -36,7 +60,7 @@ export function EventDetailModal(props: Props) {
           <span><b>Estado</b>{event.state}</span>
           <span><b>Secuencia</b>#{event.sequence}</span>
           <span><b>Organizador</b>{event.organizer}</span>
-          <span><b>Horario</b>{event.payload.start?.replace("T", " ")} – {event.payload.end?.replace("T", " ")}</span>
+          <span><b>Horario</b>{formatDateTimeRange(event.payload.start, event.payload.end)}</span>
         </div>
         <section>
           <h3>Asistencia</h3>
@@ -54,7 +78,7 @@ export function EventDetailModal(props: Props) {
             {Object.entries(props.counters).map(([user, counter]) => (
               <div className="attendee" key={user}>
                 <strong>{user}</strong>
-                <em>{counter.proposed_start?.replace("T", " ").slice(0, 16)} – {counter.proposed_end?.replace("T", " ").slice(0, 16)}</em>
+                <em>{formatDateTimeRange(counter.proposed_start, counter.proposed_end)}</em>
                 {isOrganizer && event.state !== "CANCELLED" && event.state !== "EXPIRED" && (
                   <>
                     <button onClick={() => props.onAcceptCounter(user)}>Re-anclar</button>

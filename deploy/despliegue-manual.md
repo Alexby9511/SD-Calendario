@@ -17,17 +17,22 @@ bash ./deploy/test-cluster.sh # levanta el despliegue y verifica conexiones Ray/
 
 Variables: `SDCAL_NETWORK` (red), `SDCAL_IMAGE` (prefijo de imágenes),
 `SDCAL_WORKERS` (5), `SDCAL_APIS` (3) y `SDCAL_SKIP_BUILD=1` para reutilizar las
-imágenes ya construidas. `SDCAL_API_TOKENS` debe contener un objeto JSON que
-asocie cada usuario con uno o varios tokens Bearer de al menos 32 caracteres.
-Los tokens se inyectan en las APIs y no se guardan en el repositorio.
+imágenes ya construidas. `SDCAL_AUTH_SECRET` debe ser un secreto compartido de
+al menos 32 caracteres, igual para todas las APIs; consérvalo en un gestor de
+secretos para que las sesiones sigan siendo válidas tras reiniciar. Se puede
+generar con `python -c 'import secrets; print(secrets.token_urlsafe(48))'`.
+`SDCAL_API_TOKENS` queda disponible opcionalmente para clientes heredados. Los
+secretos se inyectan en las APIs y no se guardan en el repositorio.
 
 `test-cluster.sh` vuelve a crear los contenedores de referencia (1 head, 5
 workers y 3 APIs), conserva sus volúmenes y comprueba la red Docker, el registro
 de los nodos Ray, las cinco réplicas Raft en nodos distintos, el líder común y
-el quórum desde las tres APIs. Configura primero `SDCAL_API_TOKENS`; para omitir
-la reconstrucción de imágenes ya disponibles:
+el quórum desde las tres APIs. Configura primero `SDCAL_AUTH_SECRET` (y
+`SDCAL_API_TOKENS` si se usarán clientes heredados); para omitir la
+reconstrucción de imágenes ya disponibles:
 
 ```bash
+export SDCAL_AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 export SDCAL_API_TOKENS='{"alice":"<token-de-al-menos-32-caracteres>"}'
 SDCAL_SKIP_BUILD=1 bash ./deploy/test-cluster.sh
 ```
@@ -104,7 +109,8 @@ for index in 1 2 3; do
   port=$((8080 + index))
   docker run -d --restart unless-stopped \
     --name "sdcal-api-$index" --network sdcal \
-    -e SDCAL_API_TOKENS="$SDCAL_API_TOKENS" -p "$port:8080" \
+    -e SDCAL_AUTH_SECRET="$SDCAL_AUTH_SECRET" \
+    -e SDCAL_API_TOKENS="${SDCAL_API_TOKENS:-}" -p "$port:8080" \
     sdcal-ray-api
 done
 ```

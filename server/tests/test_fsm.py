@@ -45,6 +45,25 @@ def test_read_snapshot_omits_sync_history():
     assert "seen" not in snapshot
 
 
+def test_registered_accounts_are_replicated_in_snapshots():
+    fsm = CalendarFSM()
+    command = {
+        "internal_type": "REGISTER_ACCOUNT",
+        "user_id": "alice",
+        "password_salt": "a" * 32,
+        "password_hash": "b" * 64,
+    }
+
+    assert fsm.apply(command)["code"] == 200
+    replayed = CalendarFSM.from_snapshot(fsm.snapshot())
+
+    assert replayed.accounts == {
+        "alice": {"password_salt": "a" * 32, "password_hash": "b" * 64}
+    }
+    assert replayed.apply({**command, "password_hash": "c" * 64})["code"] == 409
+    assert replayed.applied_index == fsm.applied_index
+
+
 def test_unordered_creation_does_not_consume_index():
     fsm = CalendarFSM()
     result = fsm.apply(request(sequence=2))

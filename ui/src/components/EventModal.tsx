@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, CalendarPlus, MapPin, Plus, User, UserPlus, Users, X } from "lucide-react";
-import type { GroupEvent } from "../types/protocol";
+import type { CustomCalendar, GroupEvent } from "../types/protocol";
 
 function defaultLocalTime(hourOffset: number) {
   const date = new Date();
@@ -15,12 +15,13 @@ interface Props {
   initialStart?: string;
   initialEnd?: string;
   user: string;
+  customCalendars: CustomCalendar[];
   availability: Record<string, "busy" | "available">;
   checkAvailability: (users: string[], start: string, end: string) => Promise<Record<string, "busy" | "available">>;
   editingEvent: GroupEvent | null;
   onClose: () => void;
-  onSavePersonal: (event: { title: string; start: string; end: string; tzid: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean }, existing?: GroupEvent) => void;
-  onSaveGroup: (event: { title: string; location: string; start: string; end: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number }, existing?: GroupEvent) => void;
+  onSavePersonal: (event: { title: string; start: string; end: string; tzid: string; calendar_id?: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean }, existing?: GroupEvent) => void;
+  onSaveGroup: (event: { title: string; location: string; start: string; end: string; calendar_id?: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number }, existing?: GroupEvent) => void;
 }
 
 function inputDateTime(value?: string) {
@@ -29,8 +30,17 @@ function inputDateTime(value?: string) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+function initialCustomCalendarId(event: GroupEvent | null, customCalendars: CustomCalendar[]) {
+  const calendarId = event?.payload.calendar_id;
+  if (typeof calendarId === "string" && customCalendars.some((calendar) => calendar.id === calendarId)) {
+    return calendarId;
+  }
+  return "";
+}
+
 export function EventModal(props: Props) {
   const [tab, setTab] = useState<"personal" | "group">("personal");
+  const [customCalendarId, setCustomCalendarId] = useState("");
   const [title, setTitle] = useState("Nueva actividad");
   const [location, setLocation] = useState("");
   const [start, setStart] = useState(() => defaultLocalTime(1));
@@ -40,10 +50,11 @@ export function EventModal(props: Props) {
   const [hideFromFreebusy, setHideFromFreebusy] = useState(false);
   const [rule, setRule] = useState<"ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER">("ALL");
   const [participants, setParticipants] = useState<string[]>([]);
+  const [participantDraft, setParticipantDraft] = useState("");
   const [participantPickerOpen, setParticipantPickerOpen] = useState(false);
   const [checkedAvailability, setCheckedAvailability] = useState<Record<string, "busy" | "available">>({});
   const [availabilityWarning, setAvailabilityWarning] = useState("");
-  const availableParticipants = Array.from(new Set(["alice", "bob", "carol", ...Object.keys(props.availability)]))
+  const availableParticipants = Array.from(new Set(Object.keys(props.availability)))
     .filter((user) => user !== props.user);
 
   useEffect(() => {
@@ -71,6 +82,7 @@ export function EventModal(props: Props) {
     if (props.open) {
       const event = props.editingEvent;
       setTab(event?.kind ?? props.initialMode);
+      setCustomCalendarId(initialCustomCalendarId(event, props.customCalendars));
       setTitle(event?.payload.title ?? "Nueva actividad");
       setLocation(event?.payload.location ?? "");
       setStart(inputDateTime(event?.payload.start) || props.initialStart || defaultLocalTime(1));
@@ -80,9 +92,10 @@ export function EventModal(props: Props) {
       setHideFromFreebusy(event?.payload.hide_from_freebusy ?? false);
       setRule(event?.payload.confirmation_rule ?? "ALL");
       setParticipants(event?.participants ?? []);
+      setParticipantDraft("");
       setParticipantPickerOpen(false);
     }
-  }, [props.open, props.initialMode, props.initialStart, props.initialEnd, props.editingEvent]);
+  }, [props.open, props.initialMode, props.initialStart, props.initialEnd, props.editingEvent, props.customCalendars]);
 
   if (!props.open) return null;
 
@@ -93,6 +106,15 @@ export function EventModal(props: Props) {
     setHideFromFreebusy(false);
     setRule("ALL");
     setParticipants([]);
+    setParticipantDraft("");
+    setParticipantPickerOpen(false);
+  };
+
+  const addParticipant = (value = participantDraft) => {
+    const user = value.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(user) || user === props.user || participants.includes(user)) return;
+    setParticipants((current) => [...current, user]);
+    setParticipantDraft("");
     setParticipantPickerOpen(false);
   };
 
@@ -103,6 +125,7 @@ export function EventModal(props: Props) {
         start: new Date(start).toISOString(),
         end: new Date(end).toISOString(),
         tzid: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        calendar_id: customCalendarId || undefined,
         visibility,
         availability,
         privacy: visibility,
@@ -115,6 +138,7 @@ export function EventModal(props: Props) {
         location,
         start: new Date(start).toISOString(),
         end: new Date(end).toISOString(),
+        calendar_id: customCalendarId || undefined,
         participants: participants.map((user_id) => ({ user_id, role: "REQUIRED" })),
         rule,
         quorum: Math.min(2, participants.length)
@@ -135,6 +159,16 @@ export function EventModal(props: Props) {
         </div>
         <div className="modal-body">
           <label>Título<input value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+          <label>Calendario personalizado (opcional)
+            <select value={customCalendarId} onChange={(event) => setCustomCalendarId(event.target.value)}>
+              <option value="">Sin calendario personalizado</option>
+              {props.customCalendars.map((calendar) => (
+                <option key={calendar.id} value={calendar.id}>
+                  {calendar.name}{calendar.visible ? "" : " (oculto)"}
+                </option>
+              ))}
+            </select>
+          </label>
           {tab === "group" && <label><MapPin size={14} /> Ubicación<input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Sala Atlas" /></label>}
           <div className="field-row">
             <label>Inicio<input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></label>
@@ -177,6 +211,21 @@ export function EventModal(props: Props) {
                 </div>
                 {participantPickerOpen && (
                   <div className="participant-options">
+                    <div className="participant-add">
+                      <input
+                        aria-label="Identificador del participante"
+                        value={participantDraft}
+                        onChange={(event) => setParticipantDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            addParticipant();
+                          }
+                        }}
+                        placeholder="Identificador de usuario"
+                      />
+                      <button type="button" onClick={() => addParticipant()}>Añadir</button>
+                    </div>
                     {availableParticipants.filter((user) => !participants.includes(user)).map((user) => (
                       <button type="button" key={user} onClick={() => {
                         setParticipants((current) => [...current, user]);
@@ -184,7 +233,7 @@ export function EventModal(props: Props) {
                       }}>{user}</button>
                     ))}
                     {availableParticipants.every((user) => participants.includes(user)) && (
-                      <span className="empty">No hay más participantes disponibles</span>
+                      <span className="empty">También puedes añadir por identificador.</span>
                     )}
                   </div>
                 )}

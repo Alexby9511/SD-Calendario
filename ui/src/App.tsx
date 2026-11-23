@@ -3,34 +3,93 @@ import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
 import { CalendarGrid } from "./components/CalendarGrid";
 import { EventModal } from "./components/EventModal";
+import { AuthScreen } from "./components/AuthScreen";
 import type { CalendarShare, CalendarSharePermission, CustomCalendar, SharedCalendarId } from "./types/protocol";
 import { EventDetailModal } from "./components/EventDetailModal";
 import { DistributedInspector } from "./components/DistributedInspector";
 import { ulid } from "./lib/canonical";
 import { ensureDeviceKeys, keyIdFor, signEnvelope } from "./lib/crypto";
 import { getCursor, getOutbox, advanceCursor, enqueue, updateOutbox } from "./lib/outbox";
-import { applyCommand, availability, getStatus, sync as syncServer } from "./lib/api";
+import { applyCommand, availability, getStatus, sync as syncServer, validateSession } from "./lib/api";
+import { isEventCalendarVisible, isEventVisibleToUser } from "./lib/calendars";
+import { loadCustomCalendars, saveCustomCalendars } from "./lib/customCalendars";
+import type { AuthSession } from "./lib/api";
 import type { Envelope, EnvelopeType, GroupEvent, SyncEntry } from "./types/protocol";
 
 const EVENTS_KEY = "sd-calendar-events";
 const SHARES_KEY = "sd-calendar-shares";
-const CUSTOM_CALENDARS_KEY = "sd-calendar-custom-calendars";
-const CREDENTIALS_KEY = "sd-calendar-api-credentials";
-const ACTIVE_USER_KEY = "sd-calendar-active-user";
+const SESSION_KEY = "sd-calendar-session";
 
 export default function App() {
-  const [user, setUserState] = useState(() => localStorage.getItem(ACTIVE_USER_KEY) ?? "alice");
+  const [session, setSession] = useState<AuthSession | null>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null");
+    } catch {
+      return null;
+    }
+  });
+  const [checkingSession, setCheckingSession] = useState(Boolean(session));
+
+  useEffect(() => {
+    if (!session) {
+      setCheckingSession(false);
+      return;
+    }
+    let active = true;
+    setCheckingSession(true);
+    validateSession(session.access_token)
+      .then((userId) => {
+        if (active && userId !== session.user_id) {
+          localStorage.removeItem(SESSION_KEY);
+          setSession(null);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          localStorage.removeItem(SESSION_KEY);
+          setSession(null);
+        }
+      })
+      .finally(() => {
+        if (active) setCheckingSession(false);
+      });
+    return () => { active = false; };
+  }, [session?.access_token, session?.user_id]);
+
+  if (checkingSession) {
+    return <main className="auth-screen"><p className="auth-loading">Comprobando sesión...</p></main>;
+  }
+  if (!session) {
+    return (
+      <AuthScreen onAuthenticated={(nextSession) => {
+        localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
+        setSession(nextSession);
+      }} />
+    );
+  }
+  return (
+    <CalendarApp
+      key={session.user_id}
+      user={session.user_id}
+      token={session.access_token}
+      onLogout={() => {
+        localStorage.removeItem(SESSION_KEY);
+        setSession(null);
+      }}
+    />
+  );
+}
+
+interface CalendarAppProps {
+  user: string;
+  token: string;
+  onLogout: () => void;
+}
+
+function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
   const loadedEventsUser = useRef(user);
   const loadedSharesUser = useRef(user);
   const activeUser = useRef(user);
-  const [credentials, setCredentials] = useState<Record<string, string>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem(CREDENTIALS_KEY) ?? "{}");
-    } catch {
-      return {};
-    }
-  });
-  const token = credentials[user] ?? "";
   const [group, setGroup] = useState("grupo-core");
   const [deployment] = useState("local");
   const [date, setDate] = useState(() => new Date());
@@ -44,35 +103,26 @@ export default function App() {
   const [createRange, setCreateRange] = useState<{ start: string; end: string } | null>(null);
   const [detailEvent, setDetailEvent] = useState<GroupEvent | null>(null);
   const [showCancelled, setShowCancelled] = useState(false);
-  const [busyUsers, setBusyUsers] = useState(["bob"]);
+  const [busyUsers, setBusyUsers] = useState<string[]>([]);
   const [personalVisible, setPersonalVisible] = useState(true);
   const [groupVisible, setGroupVisible] = useState(true);
   const [availabilityMap, setAvailabilityMap] = useState<Record<string, "busy" | "available">>({});
   const [events, setEvents] = useState<GroupEvent[]>(() => {
     try {
-      const activeUser = localStorage.getItem(ACTIVE_USER_KEY) ?? "alice";
-      return JSON.parse(localStorage.getItem(`${EVENTS_KEY}:${activeUser}`) ?? "[]");
+      return JSON.parse(localStorage.getItem(`${EVENTS_KEY}:${user}`) ?? "[]");
     } catch {
       return [];
     }
   });
   const [calendarShares, setCalendarShares] = useState<CalendarShare[]>(() => {
     try {
-      const activeUser = localStorage.getItem(ACTIVE_USER_KEY) ?? "alice";
-      const saved = JSON.parse(localStorage.getItem(`${SHARES_KEY}:${activeUser}`) ?? "[]");
+      const saved = JSON.parse(localStorage.getItem(`${SHARES_KEY}:${user}`) ?? "[]");
       return Array.isArray(saved) ? saved : [];
     } catch {
       return [];
     }
   });
-  const [customCalendars, setCustomCalendars] = useState<CustomCalendar[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(CUSTOM_CALENDARS_KEY) ?? "[]");
-      return Array.isArray(saved) ? saved : [];
-    } catch {
-      return [];
-    }
-  });
+  const [customCalendars, setCustomCalendars] = useState<CustomCalendar[]>(() => loadCustomCalendars(user));
   const [outbox, setOutbox] = useState(getOutbox());
   const [cursor, setCursor] = useState(() => getCursor(deployment, user));
   const [entries, setEntries] = useState<SyncEntry[]>([]);
@@ -88,13 +138,18 @@ export default function App() {
   const syncRunning = useRef(false);
 
   const personalEvents = useMemo(() => events.filter((event) => event.kind === "personal"), [events]);
+  const visibleEvents = useMemo(
+    () => events.filter((event) =>
+      isEventVisibleToUser(event, user, busyUsers)
+      && isEventCalendarVisible(event, customCalendars, personalVisible, groupVisible)
+    ),
+    [events, customCalendars, personalVisible, groupVisible, user, busyUsers]
+  );
   const currentDetailEvent = detailEvent
     ? events.find((event) => event.uid === detailEvent.uid) ?? detailEvent
     : null;
   const shareUsers = useMemo(
     () => Array.from(new Set([
-      "bob",
-      "carol",
       ...Object.keys(availabilityMap),
       ...events.flatMap((event) => [event.organizer, ...event.participants])
     ])).filter((candidate) => candidate !== user),
@@ -113,43 +168,14 @@ export default function App() {
   }, [events, user]);
 
   useEffect(() => {
-    localStorage.setItem(ACTIVE_USER_KEY, user);
-    if (loadedEventsUser.current === user) return;
-    try {
-      const saved = JSON.parse(localStorage.getItem(`${EVENTS_KEY}:${user}`) ?? "[]");
-      setEvents(Array.isArray(saved) ? saved : []);
-    } catch {
-      setEvents([]);
-    } finally {
-      loadedEventsUser.current = user;
-    }
-  }, [user]);
-
-  useEffect(() => {
-    localStorage.setItem(CREDENTIALS_KEY, JSON.stringify(credentials));
-  }, [credentials]);
-
-  useEffect(() => {
     if (loadedSharesUser.current === user) {
       localStorage.setItem(`${SHARES_KEY}:${user}`, JSON.stringify(calendarShares));
     }
   }, [calendarShares, user]);
 
   useEffect(() => {
-    if (loadedSharesUser.current === user) return;
-    try {
-      const saved = JSON.parse(localStorage.getItem(`${SHARES_KEY}:${user}`) ?? "[]");
-      setCalendarShares(Array.isArray(saved) ? saved : []);
-    } catch {
-      setCalendarShares([]);
-    } finally {
-      loadedSharesUser.current = user;
-    }
-  }, [user]);
-
-  useEffect(() => {
-    localStorage.setItem(CUSTOM_CALENDARS_KEY, JSON.stringify(customCalendars));
-  }, [customCalendars]);
+    saveCustomCalendars(user, customCalendars);
+  }, [customCalendars, user]);
 
   useEffect(() => {
     ensureDeviceKeys();
@@ -214,19 +240,6 @@ export default function App() {
     const result = await availability(users, token, start, end);
     return result.users;
   }, [token]);
-
-  const changeUser = (nextUser: string) => {
-    if (nextUser === user) return;
-    activeUser.current = nextUser;
-    setEvents([]);
-    setDetailEvent(null);
-    setAttendance({});
-    setCounters({});
-    setCalendarShares([]);
-    setAvailabilityMap({});
-    setCursor(getCursor(deployment, nextUser));
-    setUserState(nextUser);
-  };
 
   const title = date.toLocaleDateString("es", { month: "long", year: "numeric" });
 
@@ -307,17 +320,16 @@ export default function App() {
     if (offline) return;
     if (!token) {
       setOnline(false);
-      setSyncError("Guarda el token Bearer del usuario para conectar con el backend.");
+      setSyncError("Inicia sesión para conectar con el backend.");
       return;
     }
     syncRunning.current = true;
     try {
       for (const item of getOutbox()) {
         if (item.state !== "PENDING" && item.state !== "503 Retry") continue;
-        const senderToken = credentials[item.envelope.sender_id];
-        if (!senderToken) continue;
+        if (item.envelope.sender_id !== user) continue;
         try {
-          const response = await applyCommand(item.envelope, senderToken);
+          const response = await applyCommand(item.envelope, token);
           if (response.code === 200) {
             updateOutbox(item.envelope.msg_id, { state: "SENT", error: undefined });
           } else if (response.code === 409) {
@@ -457,7 +469,7 @@ export default function App() {
     void syncNow();
     const timer = window.setInterval(() => { void syncNow(); }, 3000);
     return () => window.clearInterval(timer);
-  }, [offline, token, user, credentials]);
+  }, [offline, token, user]);
 
   const queueEnvelope = async (envelope: Envelope) => {
     enqueue(envelope);
@@ -466,7 +478,7 @@ export default function App() {
   };
 
   const savePersonal = async (
-    value: { title: string; start: string; end: string; tzid: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean },
+    value: { title: string; start: string; end: string; tzid: string; calendar_id?: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean },
     existing?: GroupEvent
   ) => {
     const uid = existing?.uid ?? `${user}:personal:${ulid()}`;
@@ -477,6 +489,7 @@ export default function App() {
       start: value.start,
       end: value.end,
       tzid: value.tzid,
+      ...(value.calendar_id ? { calendar_id: value.calendar_id } : {}),
       privacy: value.privacy,
       visibility: value.visibility,
       availability: value.availability,
@@ -493,6 +506,7 @@ export default function App() {
         title: value.title,
         start: value.start,
         end: value.end,
+        ...(value.calendar_id ? { calendar_id: value.calendar_id } : {}),
         privacy: value.privacy,
         visibility: value.visibility,
         availability: value.availability,
@@ -515,7 +529,7 @@ export default function App() {
   };
 
   const saveGroup = async (
-    value: { title: string; location: string; start: string; end: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number },
+    value: { title: string; location: string; start: string; end: string; calendar_id?: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number },
     existing?: GroupEvent
   ) => {
     const uid = existing?.uid ?? `${user}:meeting:${ulid()}`;
@@ -526,6 +540,7 @@ export default function App() {
       location: value.location,
       start: value.start,
       end: value.end,
+      ...(value.calendar_id ? { calendar_id: value.calendar_id } : {}),
       tzid: Intl.DateTimeFormat().resolvedOptions().timeZone,
       participants: value.participants,
       confirmation_rule: value.rule,
@@ -538,7 +553,15 @@ export default function App() {
       organizer: existing?.organizer ?? user,
       kind: "group",
       participants: value.participants.map((participant) => participant.user_id),
-      payload: { title: value.title, location: value.location, start: value.start, end: value.end, confirmation_rule: value.rule, quorum: value.quorum }
+      payload: {
+        title: value.title,
+        location: value.location,
+        start: value.start,
+        end: value.end,
+        ...(value.calendar_id ? { calendar_id: value.calendar_id } : {}),
+        confirmation_rule: value.rule,
+        quorum: value.quorum
+      }
     };
     setEvents((current) => existing
       ? current.map((item) => item.uid === uid ? event : item)
@@ -631,12 +654,11 @@ export default function App() {
   return (
     <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
       <TopBar
-        user={user} token={token} group={group} keyId={keyIdFor(user)}
+        user={user} group={group} keyId={keyIdFor(user)}
         offline={offline} view={view} title={title} syncError={syncError}
         pending={outbox.filter((item) => item.state !== "SENT").length}
         cursor={cursor} online={online} theme={theme}
-        onUser={changeUser}
-        onToken={(value) => setCredentials((current) => ({ ...current, [user]: value.trim() }))}
+        onLogout={onLogout}
         onGroup={setGroup} onOffline={setOffline}
         onView={(nextView) => {
           setNavDirection("next");
@@ -653,7 +675,7 @@ export default function App() {
         onInspector={() => setInspectorOpen(true)}
       />
       <div className="workspace">
-        <Sidebar date={date} events={events} busyUsers={busyUsers} availability={availabilityMap}
+        <Sidebar date={date} events={visibleEvents} busyUsers={busyUsers} availability={availabilityMap}
           personalVisible={personalVisible} groupVisible={groupVisible}
           onPersonalVisible={setPersonalVisible} onGroupVisible={setGroupVisible}
           onBusyUsers={setBusyUsers}
@@ -675,7 +697,8 @@ export default function App() {
             return next;
           })} />
         <div className={`calendar-transition calendar-${navDirection}`} key={`${view}-${date.toISOString().slice(0, 10)}`}>
-          <CalendarGrid view={view} date={date} events={events} personalEvents={personalEvents}
+          <CalendarGrid view={view} date={date} events={visibleEvents} personalEvents={personalEvents}
+            customCalendars={customCalendars}
             busyUsers={busyUsers} personalVisible={personalVisible} groupVisible={groupVisible} showCancelled={showCancelled}
               onSelect={setDetailEvent} onQuickCreate={(_day, start, end) => {
                 setCreateMode("personal");
@@ -691,7 +714,7 @@ export default function App() {
       </div>
       <DistributedInspector open={inspectorOpen} outbox={outbox} entries={entries} cursor={cursor}
         onToggle={() => setInspectorOpen((open) => !open)} />
-      <EventModal open={createOpen} initialMode={createMode} initialStart={createRange?.start} initialEnd={createRange?.end} user={user} availability={availabilityMap} checkAvailability={checkAvailability} editingEvent={editingEvent}
+      <EventModal open={createOpen} initialMode={createMode} initialStart={createRange?.start} initialEnd={createRange?.end} user={user} customCalendars={customCalendars} availability={availabilityMap} checkAvailability={checkAvailability} editingEvent={editingEvent}
         onClose={() => { setCreateOpen(false); setEditingEvent(null); }} onSavePersonal={savePersonal} onSaveGroup={saveGroup} />
       <EventDetailModal event={currentDetailEvent} attendance={currentDetailEvent ? attendance[currentDetailEvent.uid] ?? {} : {}}
         counters={currentDetailEvent ? counters[currentDetailEvent.uid] ?? {} : {}}

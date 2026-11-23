@@ -158,6 +158,10 @@ class RaftCluster:
         """Return the state machine snapshot held by the leader."""
         return self.call_leader("state_snapshot", include_log)
 
+    def accounts_snapshot(self) -> Dict[str, Dict[str, str]]:
+        """Return the registered account credential hashes from the leader."""
+        return self.call_leader("accounts_snapshot")
+
     def availability(
         self,
         users: Optional[List[str]] = None,

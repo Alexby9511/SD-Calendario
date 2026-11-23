@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ -z "${SDCAL_DEMO_TOKEN:-}" ]; then
-  printf 'FALLO: configura SDCAL_DEMO_TOKEN y SDCAL_API_TOKENS para alice\n' >&2
+  printf 'FALLO: configura SDCAL_AUTH_SECRET, SDCAL_DEMO_TOKEN y SDCAL_API_TOKENS para alice\n' >&2
   exit 1
 fi
 

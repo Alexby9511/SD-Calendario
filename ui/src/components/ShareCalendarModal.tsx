@@ -37,6 +37,10 @@ export function ShareCalendarModal(props: Props) {
   const availableUsers = props.users
     .filter((user) => user !== props.currentUser && !selectedUsers.includes(user))
     .filter((user) => user.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const typedUser = query.trim().toLowerCase();
+  const canAddTypedUser = /^[a-z0-9][a-z0-9_.-]{2,31}$/.test(typedUser)
+    && typedUser !== props.currentUser
+    && !selectedUsers.includes(typedUser);
 
   const addUser = (user: string) => {
     setSelectedUsers((current) => current.includes(user) ? current : [...current, user]);
@@ -72,7 +76,12 @@ export function ShareCalendarModal(props: Props) {
                   <UserPlus size={14} /> {user}
                 </button>
               ))}
-              {availableUsers.length === 0 && <span className="empty">No se encontraron usuarios</span>}
+              {canAddTypedUser && (
+                <button type="button" onClick={() => addUser(typedUser)}>
+                  <UserPlus size={14} /> Añadir {typedUser}
+                </button>
+              )}
+              {availableUsers.length === 0 && !canAddTypedUser && <span className="empty">No se encontraron usuarios</span>}
             </div>
           )}
           <div className="share-user-chips" aria-label="Usuarios añadidos">

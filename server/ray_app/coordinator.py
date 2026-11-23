@@ -34,6 +34,9 @@ class CoordinatorState:
     def snapshot(self) -> Dict[str, Any]:
         return self.fsm.read_snapshot()
 
+    def accounts_snapshot(self) -> Dict[str, Dict[str, str]]:
+        return self.fsm.accounts_snapshot()
+
     def availability(
         self,
         users: Optional[List[str]] = None,

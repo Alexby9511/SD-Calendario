@@ -192,7 +192,7 @@ export function Sidebar(props: Props) {
 
       <section className="calendar-layers">
         <h3>Disponibilidad</h3>
-        {Array.from(new Set(["bob", "carol", ...props.shareUsers]))
+        {Array.from(new Set(props.shareUsers))
           .filter((user) => user.toLocaleLowerCase().includes(userSearch.trim().toLocaleLowerCase()))
           .map((user) => (
           <label key={user}>

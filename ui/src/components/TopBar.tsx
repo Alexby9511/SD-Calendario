@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, Menu, Moon, RefreshCw, Sun } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, LogOut, Menu, Moon, RefreshCw, Sun } from "lucide-react";
 
 interface Props {
   user: string;
-  token: string;
   group: string;
   keyId: string;
   offline: boolean;
@@ -14,8 +13,7 @@ interface Props {
   cursor: number;
   online: boolean;
   theme: "dark" | "light";
-  onUser: (value: string) => void;
-  onToken: (value: string) => void;
+  onLogout: () => void;
   onGroup: (value: string) => void;
   onOffline: (value: boolean) => void;
   onView: (value: "Día" | "Semana" | "Mes" | "Año" | "Agenda") => void;
@@ -31,12 +29,9 @@ export function TopBar(props: Props) {
   const [networkOpen, setNetworkOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
-  const [tokenDraft, setTokenDraft] = useState(props.token);
   const networkRef = useRef<HTMLDivElement>(null);
   const accountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => setTokenDraft(props.token), [props.user, props.token]);
 
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -95,17 +90,9 @@ export function TopBar(props: Props) {
           <button className="user-avatar" aria-label="Cuenta activa" onClick={() => setAccountOpen((open) => !open)}>{props.user[0].toUpperCase()}</button>
           {accountOpen && <div className="top-popover account-popover">
             <div className="account-identity"><span className="user-avatar large">{props.user[0].toUpperCase()}</span><div><strong>{props.user}</strong><small>{props.keyId}</small></div></div>
-            <label className="account-label">Usuario activo</label>
-            <div className="account-users">
-              {["alice", "bob", "carol"].map((user) => <button key={user} className={props.user === user ? "selected" : ""} onClick={() => props.onUser(user)}>{user[0].toUpperCase()}</button>)}
-            </div>
-            <label className="account-label" htmlFor="api-token">Token Bearer de {props.user}</label>
-            <input id="api-token" className="group-input" type="password" autoComplete="off"
-              placeholder="Pega el token asignado a este usuario" value={tokenDraft}
-              onChange={(e) => setTokenDraft(e.target.value)} />
-            <button className="popover-action" onClick={() => props.onToken(tokenDraft)}>Guardar token en este navegador</button>
             <label className="account-label" htmlFor="group-id">Group ID</label>
             <input id="group-id" className="group-input" value={props.group} onChange={(e) => props.onGroup(e.target.value)} />
+            <button className="popover-action" onClick={props.onLogout}><LogOut size={15} /> Cerrar sesión</button>
           </div>}
         </div>
       </div>

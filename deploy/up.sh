@@ -7,6 +7,7 @@
 #   SDCAL_WORKERS   número de workers (5)
 #   SDCAL_APIS      número de APIs (3)
 #   SDCAL_API_TOKENS JSON de usuario a token Bearer
+#   SDCAL_AUTH_SECRET clave compartida para las sesiones de usuario
 #   SDCAL_SKIP_BUILD=1 reutiliza las imágenes ya construidas
 set -euo pipefail
 
@@ -30,8 +31,8 @@ cleanup_partial() {
 }
 trap cleanup_partial EXIT
 
-if [ -z "${SDCAL_API_TOKENS:-}" ]; then
-  printf 'FALLO: configura SDCAL_API_TOKENS como JSON de usuario a token\n' >&2
+if [ -z "${SDCAL_AUTH_SECRET:-}" ] || [ "${#SDCAL_AUTH_SECRET}" -lt 32 ]; then
+  printf 'FALLO: configura SDCAL_AUTH_SECRET con al menos 32 caracteres\n' >&2
   exit 1
 fi
 
@@ -83,7 +84,8 @@ for index in $(seq 1 "$APIS"); do
   port=$((8080 + index))
   docker run -d --restart unless-stopped \
     --name "sdcal-api-$index" --network "$NETWORK" \
-    -e SDCAL_API_TOKENS="$SDCAL_API_TOKENS" \
+    -e SDCAL_API_TOKENS="${SDCAL_API_TOKENS:-}" \
+    -e SDCAL_AUTH_SECRET="$SDCAL_AUTH_SECRET" \
     -p "$port:8080" "$IMAGE-api" >/dev/null
   # El proxy de Ray Client asigna un puerto por conexión; escalonar el
   # arranque evita la carrera entre las tres APIs.

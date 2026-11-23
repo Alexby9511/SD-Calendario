@@ -83,6 +83,7 @@ export interface GroupEvent {
   participants: string[];
   payload: {
     title?: string;
+    calendar_id?: string;
     location?: string;
     start?: string;
     end?: string;
