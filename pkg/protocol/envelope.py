@@ -13,6 +13,25 @@ VALID_TYPES = {
     "CLOSE_POLL", "REOPEN", "REANCHOR", "BUSY_UPDATE", "SHARE_CALENDAR", "EVALUATE",
 }
 
+MAX_SEQUENCE = 2**63 - 1
+
+
+def _sequence_value(data: Mapping[str, Any], name: str) -> int:
+    """Return a strict non-negative integer for a sequence field.
+
+    ``int()`` is deliberately not used: it silently truncates ``1.9`` to ``1``,
+    turns booleans into ``0``/``1`` and accepts numeric strings, so the signed
+    value could differ from the received one. It also raised ``OverflowError``
+    for JSON numbers such as ``1e999`` (parsed as ``inf``), an exception the
+    state-machine adapter does not expect.
+    """
+    value = data[name]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"protocol: {name} must be an integer")
+    if value < 0 or value > MAX_SEQUENCE:
+        raise ValueError(f"protocol: {name} is out of range")
+    return value
+
 
 @dataclass
 class Envelope:
@@ -39,8 +58,8 @@ class Envelope:
             uid=data["uid"],
             sender_id=data["sender_id"],
             key_id=data.get("key_id", ""),
-            sequence=int(data["sequence"]),
-            seen_sequence=int(data["seen_sequence"]),
+            sequence=_sequence_value(data, "sequence"),
+            seen_sequence=_sequence_value(data, "seen_sequence"),
             client_sent_at=data["client_sent_at"],
             payload=data["payload"],
             signature=data.get("signature"),

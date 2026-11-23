@@ -15,15 +15,21 @@ class CoordinatorState:
         self.fsm = CalendarFSM()
 
     def apply(self, command: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply a command without raising, matching the replicated adapter."""
         try:
             return self.fsm.apply(command)
         except (KeyError, TypeError, ValueError) as exc:
-            return {
-                "code": 422,
-                "deduplicated": False,
-                "applied_index": self.fsm.applied_index,
-                "result": {"reason": str(exc)},
-            }
+            return self._rejected(str(exc))
+        except Exception as exc:
+            return self._rejected(type(exc).__name__)
+
+    def _rejected(self, reason: str) -> Dict[str, Any]:
+        return {
+            "code": 422,
+            "deduplicated": False,
+            "applied_index": self.fsm.applied_index,
+            "result": {"reason": reason},
+        }
 
     def snapshot(self) -> Dict[str, Any]:
         return self.fsm.snapshot()

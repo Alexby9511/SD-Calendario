@@ -372,6 +372,7 @@ class CalendarFSM:
         for uid, event in self.events.items():
             if (
                 uid == exclude_uid
+                or not self._event_involves(event, user)
                 or not self._event_is_busy_for(event, user)
             ):
                 continue
@@ -600,16 +601,17 @@ class CalendarFSM:
         if event["kind"] == "personal":
             if event["payload"].get("availability", "busy") != "busy":
                 return False
+            if user != event["organizer"]:
+                # A personal event only occupies its organizer calendar; it
+                # never makes another user busy.
+                return False
             if (
                 event["payload"].get("hide_from_freebusy", False)
                 and viewer is not None
                 and viewer != event["organizer"]
             ):
                 return False
-            return (
-                user == event["organizer"]
-                or not event["payload"].get("hide_from_freebusy", False)
-            )
+            return True
         if user == event["organizer"]:
             return True
         if user not in event.get("participants", []):

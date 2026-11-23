@@ -6,6 +6,7 @@ from server.ray_app.consensus.clock import FakeClock
 from server.ray_app.consensus.node import NotLeaderError, RaftNode, Role
 from server.ray_app.consensus.transport import InMemoryNetwork
 from server.ray_app.fsm import CalendarFSM
+from server.ray_app.state import CalendarState
 
 
 class Recorder:
@@ -163,3 +164,26 @@ def test_status_includes_last_applied():
     elect_leader(clock, nodes)
     nodes["n0"].propose({"msg_id": "m1"})
     assert nodes["n0"].status()["last_applied"] == 1
+
+
+def test_malformed_sequence_cannot_wedge_the_committed_log():
+    clock, _, nodes, machines = cluster(apply_factory=CalendarState)
+    elect_leader(clock, nodes)
+
+    poisoned = request_command("01J00000000000000000000061")
+    poisoned["sequence"] = float("inf")
+    rejected = nodes["n0"].propose(poisoned)
+
+    assert rejected["code"] == 422
+    assert nodes["n0"].commit_index == 1
+    assert nodes["n0"].last_applied == 1
+
+    applied = nodes["n0"].propose(request_command("01J00000000000000000000062"))
+    assert applied["code"] == 200
+    assert nodes["n0"].last_applied == 2
+    assert machines["n0"].fsm.events
+
+    nodes["n0"].send_heartbeats()
+    for node_id, node in nodes.items():
+        assert node.last_applied == 2
+        assert machines[node_id].fsm.events

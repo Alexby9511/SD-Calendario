@@ -3,7 +3,7 @@ Name: sd-calendario-ray
 Version: 0.1.0
 Summary: Calendario distribuido prototipo con Ray
 Requires-Python: >=3.10
-Requires-Dist: ray[client]>=2.9
+Requires-Dist: ray[client]>=2.60.0
 Requires-Dist: fastapi>=0.110
 Requires-Dist: uvicorn>=0.27
 Requires-Dist: cryptography>=42

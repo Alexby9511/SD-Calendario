@@ -207,6 +207,91 @@ def test_calendar_share_controls_private_visibility_and_edit_access():
     assert fsm.events[event["uid"]]["state"] == "CANCELLED"
 
 
+def test_personal_event_of_another_user_does_not_block_or_leak():
+    fsm = CalendarFSM()
+    alice_event = request()
+    alice_event["payload"] = {
+        "kind": "personal",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "availability": "busy",
+        "hide_from_freebusy": False,
+    }
+    assert fsm.apply(alice_event)["code"] == 200
+
+    # Alice sigue apareciendo como ocupada en las consultas de disponibilidad.
+    assert fsm.availability(
+        ["alice"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "bob"
+    )["users"] == {"alice": "busy"}
+
+    # ...pero el evento personal de Alice no ocupa el calendario de Bob.
+    assert fsm.availability(
+        ["bob"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "bob"
+    )["users"] == {"bob": "available"}
+
+    # ...y su calendario personal no se filtra en los conflictos de Bob.
+    assert fsm.conflicts(
+        "bob", "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z"
+    )["conflicts"] == []
+
+    # Bob puede crear su propio evento solapado.
+    bob_event = request(msg_id="01J00000000000000000000041", sender="bob")
+    bob_event["payload"] = {
+        "kind": "personal",
+        "start": "2026-11-21T10:30:00Z",
+        "end": "2026-11-21T11:30:00Z",
+    }
+    assert fsm.apply(bob_event)["code"] == 200
+
+    # Cada usuario solo ve los conflictos de su propio calendario.
+    bob_conflicts = fsm.conflicts(
+        "bob", "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z"
+    )["conflicts"]
+    assert [item["uid"] for item in bob_conflicts] == [bob_event["uid"]]
+    alice_conflicts = fsm.conflicts(
+        "alice", "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z"
+    )["conflicts"]
+    assert [item["uid"] for item in alice_conflicts] == [alice_event["uid"]]
+
+
+def test_shared_meeting_still_conflicts_for_its_participants():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob"],
+    }
+    assert fsm.apply(proposal)["code"] == 200
+
+    reply = request(
+        msg_id="01J00000000000000000000051", sender="bob", uid=proposal["uid"]
+    )
+    reply["type"] = "REPLY"
+    reply["payload"] = {"partstat": "ACCEPTED"}
+    assert fsm.apply(reply)["code"] == 200
+    assert fsm.events[proposal["uid"]]["state"] == "CONFIRMED"
+
+    # El evento compartido cuenta como conflicto para Bob...
+    conflicts = fsm.conflicts(
+        "bob", "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z"
+    )["conflicts"]
+    assert [item["uid"] for item in conflicts] == [proposal["uid"]]
+
+    # ...y Bob no puede solaparlo con un evento propio.
+    bob_event = request(msg_id="01J00000000000000000000052", sender="bob")
+    bob_event["payload"] = {
+        "kind": "personal",
+        "start": "2026-11-21T10:30:00Z",
+        "end": "2026-11-21T11:30:00Z",
+    }
+    result = fsm.apply(bob_event)
+
+    assert result["code"] == 409
+    assert result["result"]["reason"] == "organizer_schedule_conflict"
+
+
 def test_conflicting_personal_event_is_rejected():
     fsm = CalendarFSM()
     first = request()

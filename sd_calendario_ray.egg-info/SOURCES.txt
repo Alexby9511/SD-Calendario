@@ -16,6 +16,7 @@ server/cmd/__init__.py
 server/cmd/sdcald.py
 server/ray_app/__init__.py
 server/ray_app/api.py
+server/ray_app/auth.py
 server/ray_app/coordinator.py
 server/ray_app/fsm.py
 server/ray_app/logging_config.py
@@ -26,6 +27,7 @@ server/ray_app/raft_startup.py
 server/ray_app/raft_supervisor.py
 server/ray_app/raft_ticker.py
 server/ray_app/raft_transport.py
+server/ray_app/ray_monitor.py
 server/ray_app/state.py
 server/ray_app/consensus/__init__.py
 server/ray_app/consensus/clock.py
@@ -38,6 +40,7 @@ server/tests/test_api.py
 server/tests/test_api_raft.py
 server/tests/test_dedupe.py
 server/tests/test_fsm.py
+server/tests/test_outbox.py
 server/tests/test_raft_clock.py
 server/tests/test_raft_level2.py
 server/tests/test_raft_log.py
@@ -50,6 +53,7 @@ server/tests/test_raft_snapshots.py
 server/tests/test_raft_startup.py
 server/tests/test_raft_storage.py
 server/tests/test_ray_cluster.py
+server/tests/test_ray_monitor.py
 server/tests/test_ray_placement.py
 server/tests/test_ray_raft.py
 server/tests/test_ray_supervisor.py

@@ -20,15 +20,29 @@ class CalendarState:
         self.fsm = CalendarFSM()
 
     def apply(self, command: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply a command, never raising: the replicated log must stay total.
+
+        An exception escaping here aborts ``RaftNode._apply_committed`` with the
+        entry still unapplied, so every later commit re-raises and consensus is
+        permanently wedged on all replicas. Malformed commands are recorded as
+        rejections instead.
+        """
         try:
             return self.fsm.apply(command)
         except (KeyError, TypeError, ValueError) as exc:
-            return {
-                "code": 422,
-                "deduplicated": False,
-                "applied_index": self.fsm.applied_index,
-                "result": {"reason": str(exc)},
-            }
+            return self._rejected(str(exc))
+        except Exception as exc:
+            # Defence in depth: keep the exception class (deterministic across
+            # replicas) but not its message, which may not be.
+            return self._rejected(type(exc).__name__)
+
+    def _rejected(self, reason: str) -> Dict[str, Any]:
+        return {
+            "code": 422,
+            "deduplicated": False,
+            "applied_index": self.fsm.applied_index,
+            "result": {"reason": reason},
+        }
 
     def snapshot(self) -> bytes:
         return canonical_bytes(self.fsm.snapshot())

@@ -3,7 +3,9 @@ import json
 from fastapi.testclient import TestClient
 import pytest
 
+from server.ray_app import api
 from server.ray_app.api import app
+from server.ray_app.coordinator import Coordinator
 
 
 def command(msg_id):
@@ -22,26 +24,44 @@ def command(msg_id):
     }
 
 
+def personal_command(msg_id, sender, uid, start, end):
+    body = command(msg_id)
+    body["sender_id"] = sender
+    body["uid"] = uid
+    body["payload"] = {
+        "kind": "personal",
+        "title": "Cita",
+        "start": start,
+        "end": end,
+    }
+    return body
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv(
         "SDCAL_API_TOKENS",
-        json.dumps({"alice": "a" * 40}),
+        json.dumps({"alice": "a" * 40, "bob": "b" * 40}),
     )
+    monkeypatch.setattr(api, "local_coordinator", Coordinator())
     return TestClient(app)
 
 
+def headers(user="alice"):
+    token = "a" * 40 if user == "alice" else "b" * 40
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_status_and_command(client):
-    headers = {"Authorization": "Bearer " + "a" * 40}
     assert client.get("/health").status_code == 200
     assert client.get("/ready").status_code == 200
     response = client.post(
         "/v1/commands",
         json=command("01J00000000000000000000002"),
-        headers=headers,
+        headers=headers(),
     )
     assert response.status_code == 200
-    status = client.get("/v1/status", headers=headers).json()
+    status = client.get("/v1/status", headers=headers()).json()
     assert status["middleware"] == "ray"
 
 
@@ -61,8 +81,72 @@ def test_command_sender_must_match_authenticated_identity(client):
     response = client.post(
         "/v1/commands",
         json=body,
-        headers={"Authorization": "Bearer " + "a" * 40},
+        headers=headers("alice"),
     )
 
     assert response.status_code == 403
     assert response.json()["detail"]["reason"] == "sender_identity_mismatch"
+
+
+def test_overflowing_sequence_is_rejected_instead_of_crashing_the_service(client):
+    body = (
+        '{"deployment_id":"dep1","group_id":"team",'
+        '"msg_id":"01J00000000000000000000005","type":"REQUEST",'
+        '"uid":"alice:01J00000000000000000000006","sender_id":"alice",'
+        '"key_id":"key1","sequence":1e999,"seen_sequence":0,'
+        '"client_sent_at":"2026-11-20T00:00:00Z","payload":{"title":"Prueba"}}'
+    )
+
+    response = client.post(
+        "/v1/commands",
+        content=body,
+        headers={**headers(), "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == 422
+
+    # El servicio sigue admitiendo comandos válidos.
+    ok = client.post(
+        "/v1/commands",
+        json=command("01J00000000000000000000007"),
+        headers=headers(),
+    )
+    assert ok.status_code == 200
+
+
+def test_personal_event_of_another_user_is_not_reported_as_a_conflict(client):
+    created = client.post(
+        "/v1/commands",
+        json=personal_command(
+            "01J00000000000000000000011",
+            "alice",
+            "alice:01J00000000000000000000012",
+            "2026-11-21T10:00:00Z",
+            "2026-11-21T11:00:00Z",
+        ),
+        headers=headers("alice"),
+    )
+    assert created.status_code == 200
+
+    conflicts = client.get(
+        "/v1/conflicts?user=bob"
+        "&start=2026-11-21T10:00:00Z&end=2026-11-21T11:00:00Z",
+        headers=headers("bob"),
+    )
+    assert conflicts.status_code == 200
+    assert conflicts.json()["conflicts"] == []
+
+    # Bob puede crear su propio evento solapado.
+    bob_event = client.post(
+        "/v1/commands",
+        json=personal_command(
+            "01J00000000000000000000013",
+            "bob",
+            "bob:01J00000000000000000000014",
+            "2026-11-21T10:30:00Z",
+            "2026-11-21T11:30:00Z",
+        ),
+        headers=headers("bob"),
+    )
+    assert bob_event.status_code == 200
