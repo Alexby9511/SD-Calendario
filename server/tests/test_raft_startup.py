@@ -109,3 +109,103 @@ def test_connect_ray_retries_a_transient_client_proxy_failure(monkeypatch):
 
     assert fake.attempts == 2
     assert sleeps == [1]
+
+
+def test_create_named_actor_retries_get_actor_before_fallback_creation(monkeypatch):
+    class FlakyRay(FakeRay):
+        def __init__(self):
+            super().__init__(FakeExistingActor())
+            self.get_attempts = 0
+
+        def get_actor(self, name, namespace=None):
+            self.get_attempts += 1
+            if self.get_attempts < 2:
+                raise RuntimeError("actor not registered yet")
+            return self.existing
+
+    class RaceOptions:
+        def remote(self, *args):
+            raise FakeActorAlreadyExists("already exists")
+
+    class RaceActorClass:
+        def options(self, **kwargs):
+            return RaceOptions()
+
+    fake = FlakyRay()
+    monkeypatch.setattr(raft_startup, "ray", fake)
+    monkeypatch.setattr(raft_startup.time, "sleep", lambda _: None)
+
+    actor = raft_startup.create_named_actor(
+        RaceActorClass(),
+        name="sdcal-test-actor",
+        namespace="sdcal-test",
+    )
+
+    assert actor is fake.existing
+    assert fake.get_attempts == 2
+
+
+def test_create_named_actor_waits_for_deferred_creation_error(monkeypatch):
+    class DeferredRay(FakeRay):
+        def __init__(self):
+            super().__init__(FakeExistingActor())
+            self.get_calls = 0
+
+        def get(self, ref):
+            self.get_calls += 1
+            if self.get_calls == 1:
+                raise FakeActorAlreadyExists("already exists")
+            return None
+
+    existing = FakeExistingActor()
+
+    class DeferredOptions:
+        def remote(self, *args):
+            return existing
+
+    class DeferredActorClass:
+        def options(self, **kwargs):
+            return DeferredOptions()
+
+    fake = DeferredRay()
+    fake.existing = existing
+    monkeypatch.setattr(raft_startup, "ray", fake)
+    monkeypatch.setattr(raft_startup.time, "sleep", lambda _: None)
+
+    actor = raft_startup.create_named_actor(
+        DeferredActorClass(),
+        name="sdcal-test-actor",
+        namespace="sdcal-test",
+        start_method="run",
+        wait_for_start=True,
+    )
+
+    assert actor is existing
+
+
+def test_connect_ray_exhaustion_shuts_down_initialized_client(monkeypatch):
+    from server.cmd import sdcald
+
+    class FakeRay:
+        def __init__(self):
+            self.initialized = True
+            self.shutdown_calls = 0
+
+        def init(self, address=None, ignore_reinit_error=False):
+            raise ConnectionAbortedError("client proxy failed")
+
+        def is_initialized(self):
+            return self.initialized
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+            self.initialized = False
+
+    fake = FakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setattr(sdcald.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="could not connect"):
+        sdcald.connect_ray("ray://head:10001", attempts=1)
+
+    assert fake.shutdown_calls == 1

@@ -18,6 +18,18 @@ APIS="${SDCAL_APIS:-3}"
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
+UP_SUCCEEDED=0
+cleanup_partial() {
+  if [ "$UP_SUCCEEDED" = "1" ]; then
+    return
+  fi
+  printf '\nFALLO: limpiando despliegue parcial...\n' >&2
+  docker rm -f $(seq -f 'sdcal-api-%g' 1 "$APIS") >/dev/null 2>&1 || true
+  docker rm -f $(seq -f 'ray-worker-%g' 1 "$WORKERS") >/dev/null 2>&1 || true
+  docker rm -f ray-head >/dev/null 2>&1 || true
+}
+trap cleanup_partial EXIT
+
 if [ -z "${SDCAL_API_TOKENS:-}" ]; then
   printf 'FALLO: configura SDCAL_API_TOKENS como JSON de usuario a token\n' >&2
   exit 1
@@ -123,4 +135,5 @@ for index in $(seq 1 "$APIS"); do
   fi
 done
 
-log "despliegue listo: APIs en :8081-:$((8080 + APIS))"
+log "despliegue listo: APIs en 8081-$((8080 + APIS))"
+UP_SUCCEEDED=1

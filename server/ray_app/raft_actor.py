@@ -225,7 +225,10 @@ def start_raft_cluster(
     if actors:
         # Wait for every constructor to finish before the caller starts
         # elections; otherwise the first RPC can race actor creation.
-        ray.get([actor.status.remote() for actor in actors.values()])
+        ray.get(
+            [actor.status.remote() for actor in actors.values()],
+            timeout=30.0,
+        )
     return actors
 
 

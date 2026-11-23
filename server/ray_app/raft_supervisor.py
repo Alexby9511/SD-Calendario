@@ -53,6 +53,7 @@ class _SupervisorReplica:
         node_assignments: Dict[str, str],
         ticker_interval: float,
         ticker_prefix: str,
+        strict_placement: bool = False,
     ) -> None:
         self.node_ids = list(node_ids)
         self.db_paths = dict(db_paths)
@@ -63,6 +64,7 @@ class _SupervisorReplica:
         self.node_assignments = dict(node_assignments)
         self.ticker_interval = ticker_interval
         self.ticker_prefix = ticker_prefix
+        self.strict_placement = strict_placement
         self._known_placements: Dict[str, str] = dict(node_assignments)
         self._started = False
         self._thread: Optional[threading.Thread] = None
@@ -133,6 +135,13 @@ class _SupervisorReplica:
             return False
 
     def _recreate(self, node_id: str) -> bool:
+        if self.strict_placement and not self._known_placements.get(node_id):
+            self.logger.warning(
+                "strict placement refused recreation without known placement "
+                "node_id=%s",
+                node_id,
+            )
+            return False
         peers = [other for other in self.node_ids if other != node_id]
         target_node = self._known_placements.get(node_id)
         if target_node and not self._node_is_alive(target_node):
@@ -204,6 +213,7 @@ class _SupervisorReplica:
                 name=f"{self.ticker_prefix}{node_id}",
                 namespace=self.namespace,
                 start_method="run",
+                wait_for_start=True,
                 **options,
             )
         except Exception as exc:
@@ -232,6 +242,7 @@ def start_supervisor(
     supervisor_node_id: Optional[str] = None,
     ticker_interval: float = DEFAULT_TICK_INTERVAL,
     ticker_prefix: str = DEFAULT_TICKER_PREFIX,
+    strict_placement: bool = False,
 ) -> Any:
     """Start (or attach to) the detached supervisor of the replicas."""
     if ray is None or SupervisorActor is None:
@@ -250,6 +261,7 @@ def start_supervisor(
         dict(node_assignments or {}),
         ticker_interval,
         ticker_prefix,
+        strict_placement,
         name=name,
         namespace=namespace,
         start_method="run",

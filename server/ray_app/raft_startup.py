@@ -7,6 +7,7 @@ reports ``ActorAlreadyExistsError`` on its first method call. In that case
 the winner is resolved by name and the bootstrap method is retried.
 """
 
+import time
 from typing import Any, Optional
 
 from .logging_config import get_logger
@@ -35,6 +36,8 @@ def create_named_actor(
     namespace: str,
     start_method: Optional[str] = None,
     wait_for_start: bool = False,
+    attach_timeout: float = 5.0,
+    attach_interval: float = 0.1,
     **options: Any,
 ) -> Any:
     """Create a named actor, or attach to the existing one after a race.
@@ -57,10 +60,31 @@ def create_named_actor(
     except Exception as exc:
         if not is_actor_already_exists(exc):
             raise
-        logger.debug("attached to existing actor name=%s", name)
-        actor = ray.get_actor(name, namespace=namespace)
+        logger.debug("existing actor race name=%s", name)
+
+    deadline = time.monotonic() + attach_timeout
+    last_error: Optional[BaseException] = None
+    while time.monotonic() < deadline:
+        try:
+            actor = ray.get_actor(name, namespace=namespace)
+            _start(actor, start_method, wait_for_start)
+            logger.debug("attached to existing actor name=%s", name)
+            return actor
+        except Exception as exc:
+            last_error = exc
+            time.sleep(attach_interval)
+
+    try:
+        actor = actor_cls.options(**options).remote(*args)
         _start(actor, start_method, wait_for_start)
         return actor
+    except Exception as exc:
+        if not is_actor_already_exists(exc):
+            raise
+        raise RuntimeError(
+            f"raft: actor did not become available within "
+            f"{attach_timeout:.1f}s name={name}"
+        ) from (last_error or exc)
 
 
 def _start(actor: Any, method: Optional[str], wait: bool) -> None:

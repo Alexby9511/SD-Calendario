@@ -1,4 +1,7 @@
 import argparse
+import os
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -18,10 +21,27 @@ def connect_ray(address, attempts: int = 2) -> None:
     import ray
 
     logger = get_logger("raft.startup")
+    try:
+        timeout_s = float(os.getenv("RAY_CLIENT_TIMEOUT_S", "30"))
+    except ValueError:
+        timeout_s = 30.0
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
-            ray.init(address=address, ignore_reinit_error=True)
+            result = queue.Queue(maxsize=1)
+
+            def initialize() -> None:
+                try:
+                    ray.init(address=address, ignore_reinit_error=True)
+                    result.put(None)
+                except BaseException as exc:
+                    result.put(exc)
+
+            thread = threading.Thread(target=initialize, daemon=True)
+            thread.start()
+            outcome = result.get(timeout=timeout_s)
+            if isinstance(outcome, BaseException):
+                raise outcome
             return
         except Exception as exc:
             last_error = exc
@@ -39,20 +59,39 @@ def connect_ray(address, attempts: int = 2) -> None:
             except Exception:
                 pass
             time.sleep(min(attempt, 2))
+    try:
+        if ray.is_initialized():
+            ray.shutdown()
+    except Exception:
+        pass
     raise RuntimeError("ray: could not connect to the cluster") from last_error
 
 
 def _wait_for_nodes(count: int, logger, timeout: float = 60.0) -> bool:
     """Wait until the Ray cluster has enough alive nodes to place the replicas."""
     deadline = time.monotonic() + timeout
+    alive = 0
     while time.monotonic() < deadline:
-        alive = alive_node_count()
-        if alive >= count:
-            return True
+        try:
+            alive = alive_node_count()
+            if alive >= count:
+                return True
+        except Exception as exc:
+            logger.warning(
+                "transient Ray node lookup failed while waiting reason=%r",
+                exc,
+            )
         time.sleep(0.5)
+    try:
+        alive = alive_node_count()
+    except Exception as exc:
+        logger.warning(
+            "transient Ray node lookup failed while reporting timeout reason=%r",
+            exc,
+        )
     logger.warning(
         "timed out waiting for Ray nodes alive=%d expected=%d",
-        alive_node_count(),
+        alive,
         count,
     )
     return False
@@ -91,7 +130,10 @@ def start_raft_cluster(
     skip_unassigned = False
     try:
         if placement_mode == "strict" and replicas > 1:
-            _wait_for_nodes(replicas, logger)
+            if not _wait_for_nodes(replicas, logger):
+                raise PlacementError(
+                    "raft: strict placement timed out waiting for alive nodes"
+                )
         node_assignments = plan_node_placement(node_ids, placement_mode)
     except PlacementError as exc:
         # The cluster is already running but some nodes are down: attach to
@@ -138,6 +180,7 @@ def start_raft_cluster(
         namespace=namespace,
         node_assignments=node_assignments,
         supervisor_node_id=head_placement_key(),
+        strict_placement=placement_mode == "strict",
     )
     set_cluster(RaftCluster(node_ids, namespace=namespace))
 

@@ -8,7 +8,8 @@ COPY client ./client
 
 COPY deploy/wheelhouse /wheelhouse
 ARG PIP_ARGS="--timeout 60 --retries 10"
-RUN pip install --no-cache-dir $PIP_ARGS --find-links=/wheelhouse -e .
+RUN pip install --no-cache-dir $PIP_ARGS --find-links=/wheelhouse -e . \
+  && rm -rf /wheelhouse
 
 COPY deploy/ray-head.sh /usr/local/bin/ray-head
 RUN chmod +x /usr/local/bin/ray-head

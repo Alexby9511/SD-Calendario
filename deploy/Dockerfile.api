@@ -8,7 +8,8 @@ COPY client ./client
 
 COPY deploy/wheelhouse /wheelhouse
 ARG PIP_ARGS="--timeout 60 --retries 10"
-RUN pip install --no-cache-dir $PIP_ARGS --find-links=/wheelhouse -e .
+RUN pip install --no-cache-dir $PIP_ARGS --find-links=/wheelhouse -e . \
+  && rm -rf /wheelhouse
 
 EXPOSE 8080
 CMD ["python", "-m", "server.cmd.sdcald", "--ray-address=ray://ray-head:10001", "--host=0.0.0.0", "--port=8080", "--raft-placement=strict", "--raft-data-dir=/app/data/raft"]

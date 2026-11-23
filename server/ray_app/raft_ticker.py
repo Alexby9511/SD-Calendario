@@ -60,9 +60,7 @@ class _TickerReplica:
                 actor = ray.get_actor(
                     actor_name(self.replica_id), namespace=self.namespace
                 )
-                # No timeout: the next tick is only issued once the previous
-                # one finished, so a slow replica never queues pending ticks.
-                ray.get(actor.tick.remote())
+                ray.get(actor.tick.remote(), timeout=max(5.0, self.interval * 10))
             except Exception as exc:
                 # A dead or busy replica must not stop the ticker.
                 self.logger.debug(
@@ -103,6 +101,7 @@ def start_tickers(
             name=f"{prefix}{node_id}",
             namespace=namespace,
             start_method="run",
+            wait_for_start=True,
             **options,
         )
     return tickers

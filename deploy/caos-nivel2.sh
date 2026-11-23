@@ -18,11 +18,33 @@ fail() { printf '\033[31mFALLO: %s\033[0m\n' "$*" >&2; exit 1; }
 if [ -z "${SDCAL_API_TOKENS:-}" ]; then
   fail "configura SDCAL_API_TOKENS antes de ejecutar la prueba"
 fi
-ALICE_TOKEN="$(python3 -c 'import json,os; value=json.loads(os.environ["SDCAL_API_TOKENS"])["alice"]; print(value[0] if isinstance(value,list) else value)')"
+if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [ "$WORKERS" -lt 5 ]; then
+  fail "la prueba nivel 2 requiere al menos 5 workers (SDCAL_WORKERS=$WORKERS)"
+fi
+if ! [[ "$APIS" =~ ^[0-9]+$ ]] || [ "$APIS" -lt 3 ]; then
+  fail "la prueba nivel 2 requiere al menos 3 APIs (SDCAL_APIS=$APIS)"
+fi
+if ! ALICE_TOKEN="$(python3 - <<'PY'
+import json, os, sys
+try:
+    value = json.loads(os.environ["SDCAL_API_TOKENS"])
+    alice = value["alice"]
+    print(alice[0] if isinstance(alice, list) else alice)
+except (json.JSONDecodeError, KeyError, TypeError, IndexError) as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+PY
+)"; then
+  fail "SDCAL_API_TOKENS debe ser JSON válido y contener \"alice\""
+fi
 AUTH_HEADER="Authorization: Bearer $ALICE_TOKEN"
 RUN_ID="chaos-$(date +%s)-$$"
+RESPONSE_FILE="$(mktemp)"
+RETRY_FILE="$(mktemp)"
+chmod 600 "$RESPONSE_FILE" "$RETRY_FILE"
 
 cleanup() {
+  rm -f "$RESPONSE_FILE" "$RETRY_FILE"
   docker start ray-head >/dev/null 2>&1 || true
   for index in $(seq 1 "$WORKERS"); do
     docker start "ray-worker-$index" >/dev/null 2>&1 || true
@@ -72,7 +94,7 @@ applied_at_least_two() { [ "$(applied_min)" -ge 2 ] 2>/dev/null; }
 
 post_command() {
   local msg_id="$1"
-  curl -sS -o /tmp/sdcal-chaos-response.json -w '%{http_code}' \
+  curl -sS -o "$RESPONSE_FILE" -w '%{http_code}' \
     -X POST "$API1/v1/commands" \
     -H "$AUTH_HEADER" \
     -H 'Content-Type: application/json' \
@@ -91,7 +113,7 @@ MSG_B="$RUN_ID-b"
 log "confirmando el comando A antes del caos"
 code="$(post_command "$MSG_A")"
 [ "$code" = "200" ] || fail "el comando A no se confirmó (HTTP $code)"
-grep -q '"deduplicated": *false' /tmp/sdcal-chaos-response.json \
+grep -q '"deduplicated": *false' "$RESPONSE_FILE" \
   || fail "el comando A no se aplicó por primera vez"
 
 log "parando 2 APIs (2 y 3) y 2 nodos (4 y 5)"
@@ -127,13 +149,13 @@ for index in 2 3; do
 done
 
 log "reintentando el comando A en otra API (dedupe)"
-retry_code="$(curl -sS -o /tmp/sdcal-chaos-retry.json -w '%{http_code}' \
+retry_code="$(curl -sS -o "$RETRY_FILE" -w '%{http_code}' \
   -X POST "http://localhost:8082/v1/commands" \
   -H "$AUTH_HEADER" \
   -H 'Content-Type: application/json' \
   -d "{\"deployment_id\":\"dep1\",\"group_id\":\"team\",\"msg_id\":\"$MSG_A\",\"type\":\"REQUEST\",\"uid\":\"alice:$MSG_A\",\"sender_id\":\"alice\",\"key_id\":\"key1\",\"sequence\":1,\"seen_sequence\":0,\"client_sent_at\":\"2026-11-22T00:00:00Z\",\"payload\":{\"title\":\"Caos nivel 2\"}}")"
 [ "$retry_code" = "200" ] || fail "el reintento devolvió HTTP $retry_code"
-grep -q '"deduplicated": *true' /tmp/sdcal-chaos-retry.json \
+grep -q '"deduplicated": *true' "$RETRY_FILE" \
   || fail "el reintento no se deduplicó"
 
 log "caos de nivel 2 completado"
