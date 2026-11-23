@@ -8,6 +8,7 @@ estado: 5 réplicas Raft, una por nodo, con quórum 3/5.
 
 ```bash
 ./deploy/up.sh          # construye las imágenes y levanta todo el despliegue
+bash ./deploy/test-cluster.sh # levanta el despliegue y verifica conexiones Ray/Raft
 ./deploy/down.sh        # detiene los contenedores y borra los volúmenes
 ./deploy/demo.sh        # propuesta, reintento con el mismo msg_id y estado
 ./deploy/caos-nivel2.sh # caos de nivel 2: 2 APIs + 2 nodos caídos a la vez
@@ -19,6 +20,17 @@ Variables: `SDCAL_NETWORK` (red), `SDCAL_IMAGE` (prefijo de imágenes),
 imágenes ya construidas. `SDCAL_API_TOKENS` debe contener un objeto JSON que
 asocie cada usuario con uno o varios tokens Bearer de al menos 32 caracteres.
 Los tokens se inyectan en las APIs y no se guardan en el repositorio.
+
+`test-cluster.sh` vuelve a crear los contenedores de referencia (1 head, 5
+workers y 3 APIs), conserva sus volúmenes y comprueba la red Docker, el registro
+de los nodos Ray, las cinco réplicas Raft en nodos distintos, el líder común y
+el quórum desde las tres APIs. Configura primero `SDCAL_API_TOKENS`; para omitir
+la reconstrucción de imágenes ya disponibles:
+
+```bash
+export SDCAL_API_TOKENS='{"alice":"<token-de-al-menos-32-caracteres>"}'
+SDCAL_SKIP_BUILD=1 bash ./deploy/test-cluster.sh
+```
 
 ## 1. Crear la red y las imágenes
 
