@@ -34,12 +34,99 @@ def test_request_and_snapshot_replay():
     assert replayed.applied_index == 1
 
 
+def test_read_snapshot_omits_sync_history():
+    fsm = CalendarFSM()
+    assert fsm.apply(request())["code"] == 200
+
+    snapshot = fsm.read_snapshot()
+
+    assert "events" in snapshot
+    assert "log" not in snapshot
+    assert "seen" not in snapshot
+
+
 def test_unordered_creation_does_not_consume_index():
     fsm = CalendarFSM()
     result = fsm.apply(request(sequence=2))
     assert result["code"] == 409
     assert fsm.applied_index == 0
     assert fsm.snapshot()["events"] == {}
+
+
+def _event_and_mutator(command_type):
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob"],
+        "confirmation_rule": "ORGANIZER",
+    }
+    fsm.apply(proposal)
+    if command_type == "REOPEN":
+        fsm.events[proposal["uid"]]["state"] = "CONFIRMED"
+    command = request(
+        msg_id="01J00000000000000000000042",
+        sender="bob" if command_type == "COUNTER" else "alice",
+        uid=proposal["uid"],
+        sequence=1,
+    )
+    command["type"] = command_type
+    command["payload"] = (
+        {
+            "proposed_start": "2026-11-21T12:00:00Z",
+            "proposed_end": "2026-11-21T13:00:00Z",
+        }
+        if command_type == "COUNTER"
+        else {"reask": True}
+        if command_type == "REOPEN"
+        else {}
+    )
+    return fsm, proposal, command
+
+
+@pytest.mark.parametrize("command_type", ["CANCEL", "CLOSE_POLL", "REOPEN", "COUNTER"])
+def test_mutating_commands_reject_stale_sequences(command_type):
+    fsm, proposal, command = _event_and_mutator(command_type)
+
+    result = fsm.apply(command)
+
+    assert result["code"] == 409
+    assert result["result"]["reason"] == "stale_sequence"
+    assert fsm.events[proposal["uid"]]["sequence"] == 1
+    assert fsm.applied_index == 1
+    assert proposal["uid"] not in fsm.counters
+
+
+@pytest.mark.parametrize("command_type", ["CANCEL", "CLOSE_POLL", "REOPEN", "COUNTER"])
+def test_mutating_commands_advance_the_event_sequence(command_type):
+    fsm, proposal, command = _event_and_mutator(command_type)
+    if command_type == "REOPEN":
+        fsm.events[proposal["uid"]]["state"] = "CONFIRMED"
+    command["sequence"] = 2
+
+    result = fsm.apply(command)
+
+    assert result["code"] == 200
+    assert fsm.events[proposal["uid"]]["sequence"] == 2
+
+
+def test_stale_request_update_is_an_explicit_conflict():
+    fsm = CalendarFSM()
+    original = request()
+    assert fsm.apply(original)["code"] == 200
+
+    stale = request(
+        msg_id="01J00000000000000000000043",
+        sequence=1,
+        uid=original["uid"],
+    )
+    result = fsm.apply(stale)
+
+    assert result["code"] == 409
+    assert result["result"]["reason"] == "stale_sequence"
+    assert fsm.events[original["uid"]]["sequence"] == 1
 
 
 def test_group_replies_confirm_after_all_attendees_accept():
@@ -134,16 +221,19 @@ def test_organizer_can_close_and_reopen_poll_and_counters_sync():
         "proposed_start": "2026-11-21T12:00:00Z",
         "proposed_end": "2026-11-21T13:00:00Z",
     }
+    counter["sequence"] = 2
     assert fsm.apply(counter)["code"] == 200
     assert fsm.sync_for("alice")["snapshot"]["counters"][proposal["uid"]]["bob"] == counter["payload"]
 
     close = request(msg_id="01J00000000000000000000034", uid=proposal["uid"])
     close["type"] = "CLOSE_POLL"
+    close["sequence"] = 3
     close["payload"] = {}
     assert fsm.apply(close)["result"]["state"] == "CONFIRMED"
 
     reopen = request(msg_id="01J00000000000000000000035", uid=proposal["uid"])
     reopen["type"] = "REOPEN"
+    reopen["sequence"] = 4
     reopen["payload"] = {"reask": True}
     assert fsm.apply(reopen)["result"]["state"] == "PROPOSED"
     assert fsm.attendance[proposal["uid"]] == {}
@@ -201,6 +291,7 @@ def test_calendar_share_controls_private_visibility_and_edit_access():
         msg_id="01J00000000000000000000039",
         sender="bob",
         uid=event["uid"],
+        sequence=3,
     )
     cancel["type"] = "CANCEL"
     assert fsm.apply(cancel)["code"] == 200
@@ -413,12 +504,10 @@ def test_cancelled_event_does_not_block_a_new_event():
 def test_unsupported_commands_are_not_reported_as_success():
     fsm = CalendarFSM()
     command = request()
-    command["type"] = "DECLINECOUNTER"
+    command["type"] = "INVALID_COMMAND"
 
-    result = fsm.apply(command)
-
-    assert result["code"] == 422
-    assert result["result"]["reason"] == "unsupported_command"
+    with pytest.raises(ValueError, match="unknown type"):
+        fsm.apply(command)
     assert fsm.applied_index == 0
 
 
@@ -515,6 +604,199 @@ def test_public_event_is_visible_to_other_users_in_sync():
     fsm.apply(event)
 
     assert fsm.sync_for("bob")["entries"][0]["command"]["uid"] == event["uid"]
+
+
+def test_sync_limits_are_capped_and_snapshot_can_be_omitted_from_pages():
+    fsm = CalendarFSM()
+    assert fsm.apply(request())["code"] == 200
+
+    page = fsm.sync_for("alice", limit=1, include_snapshot=False)
+
+    assert "snapshot" not in page
+    with pytest.raises(ValueError, match="invalid_sync_limit"):
+        fsm.sync(0, 1001)
+
+
+def test_msg_id_deduplication_is_scoped_to_sender():
+    fsm = CalendarFSM()
+    shared_msg_id = "01J00000000000000000000081"
+    alice = request(msg_id=shared_msg_id)
+    assert fsm.apply(alice)["code"] == 200
+
+    bob = request(
+        msg_id=shared_msg_id,
+        sender="bob",
+        uid="bob:01J00000000000000000000082",
+    )
+    assert fsm.apply(bob)["code"] == 200
+
+    repeated_bob = request(
+        msg_id=shared_msg_id,
+        sender="bob",
+        uid="bob:01J00000000000000000000083",
+    )
+    assert fsm.apply(repeated_bob)["deduplicated"] is True
+    assert len(fsm.events) == 2
+    assert fsm.applied_index == 2
+
+
+def test_reanchor_applies_a_counter_and_clears_stale_counters():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob"],
+    }
+    assert fsm.apply(proposal)["code"] == 200
+    counter = request(
+        msg_id="01J00000000000000000000084",
+        sender="bob",
+        uid=proposal["uid"],
+        sequence=2,
+    )
+    counter["type"] = "COUNTER"
+    counter["payload"] = {
+        "proposed_start": "2026-11-21T12:00:00Z",
+        "proposed_end": "2026-11-21T13:00:00Z",
+    }
+    assert fsm.apply(counter)["code"] == 200
+
+    reanchor = request(
+        msg_id="01J00000000000000000000085",
+        uid=proposal["uid"],
+        sequence=3,
+    )
+    reanchor["type"] = "REANCHOR"
+    reanchor["payload"] = {"counter_user": "bob"}
+    result = fsm.apply(reanchor)
+
+    event = fsm.events[proposal["uid"]]
+    assert result["code"] == 200
+    assert event["sequence"] == 3
+    assert event["state"] == "PROPOSED"
+    assert event["payload"]["start"] == counter["payload"]["proposed_start"]
+    assert fsm.counters.get(proposal["uid"]) is None
+    assert fsm.attendance[proposal["uid"]] == {}
+
+
+def test_decline_counter_removes_only_the_selected_proposal():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob", "carol"],
+    }
+    fsm.apply(proposal)
+    for sequence, sender, msg_id in (
+        (2, "bob", "01J00000000000000000000086"),
+        (3, "carol", "01J00000000000000000000087"),
+    ):
+        counter = request(msg_id=msg_id, sender=sender, uid=proposal["uid"], sequence=sequence)
+        counter["type"] = "COUNTER"
+        counter["payload"] = {
+            "proposed_start": "2026-11-21T12:00:00Z",
+            "proposed_end": "2026-11-21T13:00:00Z",
+        }
+        assert fsm.apply(counter)["code"] == 200
+
+    decline = request(
+        msg_id="01J00000000000000000000088",
+        uid=proposal["uid"],
+        sequence=4,
+    )
+    decline["type"] = "DECLINECOUNTER"
+    decline["payload"] = {"counter_user": "bob"}
+
+    assert fsm.apply(decline)["code"] == 200
+    assert set(fsm.counters[proposal["uid"]]) == {"carol"}
+    assert fsm.events[proposal["uid"]]["sequence"] == 4
+
+
+def test_editing_event_clears_old_counters():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob"],
+    }
+    fsm.apply(proposal)
+    fsm.counters[proposal["uid"]] = {"bob": {"proposed_start": "old"}}
+    update = request(
+        msg_id="01J00000000000000000000089",
+        uid=proposal["uid"],
+        sequence=2,
+    )
+    update["payload"] = {
+        **proposal["payload"],
+        "start": "2026-11-21T14:00:00Z",
+        "end": "2026-11-21T15:00:00Z",
+    }
+
+    assert fsm.apply(update)["code"] == 200
+    assert proposal["uid"] not in fsm.counters
+
+
+def test_evaluate_expires_proposals_with_valid_system_time():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "deadline_utc": "2026-11-20T10:00:00Z",
+        "participants": ["bob"],
+    }
+    assert fsm.apply(proposal)["code"] == 200
+    fsm.counters[proposal["uid"]] = {"bob": {"proposed_start": "stale"}}
+    evaluation = request(
+        msg_id="01J00000000000000000000090",
+        sender="system",
+        uid="system:calendar",
+        sequence=0,
+    )
+    evaluation["type"] = "EVALUATE"
+    evaluation["key_id"] = ""
+    evaluation["payload"] = {"now": "2026-11-21T00:00:00Z"}
+
+    result = fsm.apply(evaluation)
+
+    assert result["code"] == 200
+    assert result["result"]["expired"] == [proposal["uid"]]
+    assert fsm.events[proposal["uid"]]["state"] == "EXPIRED"
+    assert fsm.events[proposal["uid"]]["sequence"] == 2
+    assert proposal["uid"] not in fsm.counters
+
+
+@pytest.mark.parametrize(
+    "sender,payload,expected_reason",
+    [
+        ("alice", {"now": "2026-11-21T00:00:00Z"}, "system_command_only"),
+        ("system", {"now": "not-a-date"}, "invalid_evaluation_time"),
+    ],
+)
+def test_evaluate_rejects_non_system_or_invalid_time(sender, payload, expected_reason):
+    fsm = CalendarFSM()
+    evaluation = request(
+        msg_id="01J00000000000000000000091",
+        sender=sender,
+        uid="system:calendar",
+        sequence=0,
+    )
+    evaluation["type"] = "EVALUATE"
+    evaluation["key_id"] = ""
+    evaluation["payload"] = payload
+
+    result = fsm.apply(evaluation)
+
+    assert result["code"] in (403, 422)
+    assert result["result"]["reason"] == expected_reason
+    assert fsm.applied_index == 0
 
 
 @pytest.mark.parametrize(

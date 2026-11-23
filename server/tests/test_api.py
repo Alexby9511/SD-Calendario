@@ -6,6 +6,7 @@ import pytest
 from server.ray_app import api
 from server.ray_app.api import app
 from server.ray_app.coordinator import Coordinator
+from server.ray_app.auth import TokenRegistry
 
 
 def command(msg_id):
@@ -44,6 +45,7 @@ def client(monkeypatch):
         json.dumps({"alice": "a" * 40, "bob": "b" * 40}),
     )
     monkeypatch.setattr(api, "local_coordinator", Coordinator())
+    api.set_cluster(None)
     return TestClient(app)
 
 
@@ -62,7 +64,36 @@ def test_status_and_command(client):
     )
     assert response.status_code == 200
     status = client.get("/v1/status", headers=headers()).json()
-    assert status["middleware"] == "ray"
+    assert status["middleware"] == "local"
+
+
+def test_sync_rejects_limits_over_one_thousand(client):
+    response = client.get("/v1/sync?limit=1001", headers=headers())
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "invalid_sync_limit"
+
+
+def test_token_registry_reads_current_environment(monkeypatch):
+    first_token = "a" * 40
+    second_token = "b" * 40
+    monkeypatch.setenv("SDCAL_API_TOKENS", json.dumps({"alice": first_token}))
+    assert TokenRegistry.from_environment().authenticate(first_token) == "alice"
+
+    monkeypatch.setenv("SDCAL_API_TOKENS", json.dumps({"bob": second_token}))
+    assert TokenRegistry.from_environment().authenticate(second_token) == "bob"
+
+
+def test_local_availability_timeout_returns_503(client, monkeypatch):
+    def timeout(*args, **kwargs):
+        raise TimeoutError("query timed out")
+
+    monkeypatch.setattr(api.local_coordinator, "availability", timeout)
+
+    response = client.get("/v1/availability", headers=headers())
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["reason"] == "query_timeout"
 
 
 def test_data_routes_require_a_bearer_token(client):

@@ -9,6 +9,7 @@ from server.ray_app.raft_actor import start_raft_cluster, stop_raft_cluster
 from server.ray_app.raft_cluster import RaftCluster
 from server.ray_app.raft_supervisor import start_supervisor, stop_supervisor
 from server.ray_app.raft_ticker import start_tickers, stop_tickers
+from server.ray_app.raft_supervisor import _SupervisorReplica
 
 
 def request_command(index: int, title: str):
@@ -140,3 +141,71 @@ def test_fresh_client_attaches_to_the_running_replicas(supervised_cluster):
     result = fresh.propose(request_command(81, "Tras reiniciar la API"))
     assert result["code"] == 200
     assert fresh.leader() is not None
+
+
+def test_strict_supervisor_rejects_missing_placement_targets():
+    with pytest.raises(ValueError, match="requires placements"):
+        _SupervisorReplica(
+            ["n0"],
+            {"n0": "n0.db"},
+            "sdcal-test",
+            lambda: None,
+            0.1,
+            0.1,
+            {},
+            0.1,
+            "ticker-",
+            strict_placement=True,
+        )
+
+
+def test_unresponsive_actor_is_killed_after_health_threshold(monkeypatch):
+    class HangingActor:
+        class StatusMethod:
+            def remote(self):
+                return "status-ref"
+
+        status = StatusMethod()
+
+    class FakeRay:
+        registered = True
+        killed = 0
+
+        def get_actor(self, name, namespace=None):
+            if self.registered:
+                return actor
+            raise RuntimeError("actor is no longer registered")
+
+        def get(self, ref, timeout=None):
+            raise TimeoutError("actor status timed out")
+
+        def kill(self, handle, no_restart=True):
+            assert handle is actor
+            assert no_restart is True
+            self.killed += 1
+            self.registered = False
+
+    actor = HangingActor()
+    fake_ray = FakeRay()
+    monkeypatch.setattr("server.ray_app.raft_supervisor.ray", fake_ray)
+    supervisor = _SupervisorReplica(
+        ["n0"],
+        {"n0": "n0.db"},
+        "sdcal-test",
+        lambda: None,
+        0.1,
+        0.1,
+        {},
+        0.1,
+        "ticker-",
+        unhealthy_threshold=2,
+    )
+    recreated = []
+    monkeypatch.setattr(supervisor, "_recreate", lambda node_id: recreated.append(node_id) or True)
+    monkeypatch.setattr(supervisor, "_ensure_ticker", lambda _node_id: False)
+
+    assert supervisor.check() == []
+    assert fake_ray.killed == 0
+    assert supervisor.check() == ["n0"]
+    assert fake_ray.killed == 1
+    assert recreated == ["n0"]

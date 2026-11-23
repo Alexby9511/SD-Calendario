@@ -52,6 +52,7 @@ export interface SyncEntry {
   result: Record<string, unknown>;
   event?: GroupEvent;
   attendance?: Record<string, string>;
+  counters?: Record<string, { proposed_start?: string; proposed_end?: string }>;
 }
 
 export interface SyncPage {

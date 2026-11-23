@@ -10,6 +10,12 @@ try:
 except ImportError:
     ray = None
 
+_QUERY_TIMEOUT_ERRORS = (TimeoutError,)
+if ray is not None:
+    ray_timeout_error = getattr(ray.exceptions, "GetTimeoutError", None)
+    if isinstance(ray_timeout_error, type):
+        _QUERY_TIMEOUT_ERRORS += (ray_timeout_error,)
+
 from .coordinator import Coordinator, CoordinatorActor
 from .auth import AuthenticationNotConfigured, TokenRegistry
 from .raft_cluster import NoLeaderError, RaftCluster
@@ -104,6 +110,12 @@ def _visible_snapshot(snapshot: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         },
         "applied_index": snapshot.get("applied_index", 0),
     }
+
+
+def _query_timeout(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=503, detail={"reason": "query_timeout"}
+    )
 
 
 app = FastAPI(title="SD Calendario sobre Ray") if FastAPI is not None else None
@@ -210,6 +222,8 @@ if app is not None:
         if cluster is not None:
             try:
                 return cluster.availability(selected, start, end, user_id)
+            except _QUERY_TIMEOUT_ERRORS as exc:
+                raise _query_timeout(exc) from exc
             except ValueError as exc:
                 raise HTTPException(
                     status_code=422, detail={"reason": str(exc)}
@@ -222,6 +236,8 @@ if app is not None:
             raise HTTPException(
                 status_code=422, detail={"reason": str(exc)}
             ) from exc
+        except _QUERY_TIMEOUT_ERRORS as exc:
+            raise _query_timeout(exc) from exc
 
     @app.get("/v1/conflicts")
     def conflicts(
@@ -239,6 +255,8 @@ if app is not None:
         if cluster is not None:
             try:
                 return cluster.conflicts(user, start, end, exclude_uid)
+            except _QUERY_TIMEOUT_ERRORS as exc:
+                raise _query_timeout(exc) from exc
             except ValueError as exc:
                 raise HTTPException(
                     status_code=422, detail={"reason": str(exc)}
@@ -249,23 +267,30 @@ if app is not None:
             raise HTTPException(
                 status_code=422, detail={"reason": str(exc)}
             ) from exc
+        except _QUERY_TIMEOUT_ERRORS as exc:
+            raise _query_timeout(exc) from exc
 
     @app.get("/v1/sync")
     def sync(
         since: int = 0,
         limit: int = 100,
+        include_snapshot: bool = True,
         user_id: str = Depends(authenticated_user),
     ):
         cluster = get_cluster()
         if cluster is not None:
             try:
-                return cluster.sync(since, limit, user_id)
+                return cluster.sync(since, limit, user_id, include_snapshot)
             except ValueError as exc:
                 raise HTTPException(
                     status_code=422, detail={"reason": str(exc)}
                 ) from exc
         try:
-            return resolve(call_coordinator("sync", since, limit, user_id))
+            return resolve(
+                call_coordinator(
+                    "sync", since, limit, user_id, include_snapshot
+                )
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail={"reason": str(exc)}) from exc
 

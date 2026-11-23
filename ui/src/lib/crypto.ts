@@ -14,25 +14,26 @@ interface DeviceKey {
   keyId: string;
 }
 
-const KEY_NAMES = ["alice", "bob", "carol"];
-
-export function ensureDeviceKeys(): Record<string, DeviceKey> {
+export function ensureDeviceKeys(senderId?: string): Record<string, DeviceKey> {
   const stored = localStorage.getItem("sd-calendar-device-keys");
-  if (stored) return JSON.parse(stored);
-  const keys: Record<string, DeviceKey> = {};
-  for (const user of KEY_NAMES) {
+  const keys: Record<string, DeviceKey> = stored ? JSON.parse(stored) : {};
+  if (senderId && !keys[senderId]) {
     const privateBytes = ed.utils.randomPrivateKey();
     const publicBytes = ed.getPublicKey(privateBytes);
     const privateKey = toHex(privateBytes);
     const publicKey = toHex(publicBytes);
-    keys[user] = { privateKey, publicKey, keyId: `did:${user}:` + publicKey.slice(0, 12) };
+    keys[senderId] = {
+      privateKey,
+      publicKey,
+      keyId: `did:${senderId}:` + publicKey.slice(0, 12)
+    };
+    localStorage.setItem("sd-calendar-device-keys", JSON.stringify(keys));
   }
-  localStorage.setItem("sd-calendar-device-keys", JSON.stringify(keys));
   return keys;
 }
 
 export async function signEnvelope(envelope: Omit<Envelope, "signature">): Promise<Envelope> {
-  const keys = ensureDeviceKeys();
+  const keys = ensureDeviceKeys(envelope.sender_id);
   const key = keys[envelope.sender_id];
   if (!key) throw new Error(`No local key for ${envelope.sender_id}`);
   const signingInput = {
@@ -58,5 +59,5 @@ export function toHex(bytes: Uint8Array): string {
 }
 
 export function keyIdFor(user: string): string {
-  return ensureDeviceKeys()[user]?.keyId ?? `did:${user}:unknown`;
+  return ensureDeviceKeys(user)[user].keyId;
 }

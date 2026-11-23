@@ -183,6 +183,50 @@ def test_create_named_actor_waits_for_deferred_creation_error(monkeypatch):
     assert actor is existing
 
 
+def test_strict_placement_recovery_uses_existing_supervisor_targets(monkeypatch):
+    from server.cmd import sdcald
+
+    targets = {"n0": "resource:sdcal-node-0", "n1": "resource:sdcal-node-1"}
+
+    class Ref:
+        pass
+
+    class ExistingSupervisor:
+        class Placements:
+            def remote(self):
+                return Ref()
+
+        placements = Placements()
+
+    class FakeRay:
+        def get_actor(self, name, namespace=None):
+            assert name == "sdcal-supervisor"
+            assert namespace == "sdcal-test"
+            return ExistingSupervisor()
+
+        def get(self, ref, timeout=None):
+            assert isinstance(ref, Ref)
+            assert timeout == 2.0
+            return targets
+
+    monkeypatch.setitem(sys.modules, "ray", FakeRay())
+
+    assert sdcald._recover_strict_placements(["n0", "n1"], "sdcal-test") == targets
+
+
+def test_strict_placement_recovery_fails_when_a_replica_target_is_unknown(monkeypatch):
+    from server.cmd import sdcald
+
+    class FakeRay:
+        def get_actor(self, name, namespace=None):
+            raise RuntimeError("actor unavailable")
+
+    monkeypatch.setitem(sys.modules, "ray", FakeRay())
+
+    with pytest.raises(RuntimeError, match="cannot safely recover targets"):
+        sdcald._recover_strict_placements(["n0"], "sdcal-test")
+
+
 def test_connect_ray_exhaustion_shuts_down_initialized_client(monkeypatch):
     from server.cmd import sdcald
 

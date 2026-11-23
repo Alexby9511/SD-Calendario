@@ -37,6 +37,8 @@ except ImportError:
 DEFAULT_SUPERVISOR_NAME = "sdcal-supervisor"
 DEFAULT_CHECK_INTERVAL = 0.5
 DEFAULT_CHECK_TIMEOUT = 2.0
+DEFAULT_UNHEALTHY_THRESHOLD = 3
+_UNRESPONSIVE_STATUS = "_supervisor_unresponsive"
 
 
 class _SupervisorReplica:
@@ -54,7 +56,14 @@ class _SupervisorReplica:
         ticker_interval: float,
         ticker_prefix: str,
         strict_placement: bool = False,
+        unhealthy_threshold: int = DEFAULT_UNHEALTHY_THRESHOLD,
     ) -> None:
+        if (
+            not isinstance(unhealthy_threshold, int)
+            or isinstance(unhealthy_threshold, bool)
+            or unhealthy_threshold < 1
+        ):
+            raise ValueError("raft: unhealthy threshold must be a positive integer")
         self.node_ids = list(node_ids)
         self.db_paths = dict(db_paths)
         self.namespace = namespace
@@ -66,6 +75,14 @@ class _SupervisorReplica:
         self.ticker_prefix = ticker_prefix
         self.strict_placement = strict_placement
         self._known_placements: Dict[str, str] = dict(node_assignments)
+        missing_placements = set(self.node_ids) - set(self._known_placements)
+        if self.strict_placement and missing_placements:
+            raise ValueError(
+                "raft: strict supervisor requires placements for "
+                + ", ".join(sorted(missing_placements))
+            )
+        self.unhealthy_threshold = unhealthy_threshold
+        self._unhealthy_checks: Dict[str, int] = {}
         self._started = False
         self._thread: Optional[threading.Thread] = None
         self.logger = get_logger("raft.supervisor")
@@ -102,6 +119,8 @@ class _SupervisorReplica:
             if status is None:
                 if self._recreate(node_id):
                     recovered.append(node_id)
+            elif status.get(_UNRESPONSIVE_STATUS):
+                pass
             else:
                 self._learn_placement(node_id, status)
             self._ensure_ticker(node_id)
@@ -113,17 +132,67 @@ class _SupervisorReplica:
                 actor_name(node_id), namespace=self.namespace
             )
         except Exception:
+            self._unhealthy_checks.pop(node_id, None)
             return None
         try:
-            return ray.get(actor.status.remote(), timeout=self.timeout)
-        except Exception:
-            return None
+            status = ray.get(actor.status.remote(), timeout=self.timeout)
+        except Exception as exc:
+            failures = self._unhealthy_checks.get(node_id, 0) + 1
+            self._unhealthy_checks[node_id] = failures
+            if failures < self.unhealthy_threshold:
+                self.logger.warning(
+                    "replica health check timed out node_id=%s failures=%d/%d",
+                    node_id,
+                    failures,
+                    self.unhealthy_threshold,
+                )
+                return {_UNRESPONSIVE_STATUS: True}
+            self.logger.error(
+                "terminating unresponsive replica node_id=%s failures=%d "
+                "reason=%r",
+                node_id,
+                failures,
+                exc,
+            )
+            if self._terminate_unresponsive(node_id, actor):
+                self._unhealthy_checks.pop(node_id, None)
+                return None
+            return {_UNRESPONSIVE_STATUS: True}
+        self._unhealthy_checks.pop(node_id, None)
+        return status
 
     def _learn_placement(self, node_id: str, status: Dict[str, Any]) -> None:
         """Remember the placement target reported by a live replica."""
         placement = status.get("placement_key")
+        if not placement and status.get("ray_node_id"):
+            placement = f"node:{status['ray_node_id']}"
         if placement:
             self._known_placements[node_id] = str(placement)
+
+    def placements(self) -> Dict[str, str]:
+        """Return the known replica targets for startup recovery."""
+        return dict(self._known_placements)
+
+    def _terminate_unresponsive(self, node_id: str, actor: Any) -> bool:
+        try:
+            ray.kill(actor, no_restart=True)
+        except Exception as exc:
+            self.logger.warning(
+                "could not terminate unresponsive replica node_id=%s reason=%r",
+                node_id,
+                exc,
+            )
+        deadline = time.monotonic() + max(self.timeout, 0.5)
+        while time.monotonic() < deadline:
+            try:
+                ray.get_actor(actor_name(node_id), namespace=self.namespace)
+            except Exception:
+                return True
+            time.sleep(0.05)
+        self.logger.warning(
+            "unresponsive replica still registered node_id=%s", node_id
+        )
+        return False
 
     def _is_alive(self, node_id: str) -> bool:
         return self._status(node_id) is not None
@@ -152,16 +221,12 @@ class _SupervisorReplica:
             )
             return False
 
-        options: Dict[str, Any] = {
-            "name": actor_name(node_id),
-            "namespace": self.namespace,
-            "lifetime": "detached",
-            "get_if_exists": False,
-        }
+        options: Dict[str, Any] = {"lifetime": "detached", "get_if_exists": True}
         if target_node:
             options.update(placement_options(target_node))
         try:
-            RaftActor.options(**options).remote(
+            create_named_actor(
+                RaftActor,
                 node_id,
                 peers,
                 self.db_paths[node_id],
@@ -171,6 +236,12 @@ class _SupervisorReplica:
                 DEFAULT_ELECTION_TIMEOUT,
                 DEFAULT_HEARTBEAT_INTERVAL,
                 target_node,
+                name=actor_name(node_id),
+                namespace=self.namespace,
+                start_method="status",
+                wait_for_start=True,
+                attach_timeout=self.timeout,
+                **options,
             )
         except Exception as exc:
             self.logger.warning(
@@ -243,6 +314,7 @@ def start_supervisor(
     ticker_interval: float = DEFAULT_TICK_INTERVAL,
     ticker_prefix: str = DEFAULT_TICKER_PREFIX,
     strict_placement: bool = False,
+    unhealthy_threshold: int = DEFAULT_UNHEALTHY_THRESHOLD,
 ) -> Any:
     """Start (or attach to) the detached supervisor of the replicas."""
     if ray is None or SupervisorActor is None:
@@ -262,6 +334,7 @@ def start_supervisor(
         ticker_interval,
         ticker_prefix,
         strict_placement,
+        unhealthy_threshold,
         name=name,
         namespace=namespace,
         start_method="run",

@@ -11,6 +11,8 @@ interface Props {
   onClose: () => void;
   onReply: (partstat: "ACCEPTED" | "DECLINED" | "TENTATIVE") => void;
   onCounter: (start: string, end: string) => void;
+  onAcceptCounter: (counterUser: string) => void;
+  onDeclineCounter: (counterUser: string) => void;
   onClosePoll: () => void;
   onReopen: () => void;
   onCancel: () => void;
@@ -53,6 +55,12 @@ export function EventDetailModal(props: Props) {
               <div className="attendee" key={user}>
                 <strong>{user}</strong>
                 <em>{counter.proposed_start?.replace("T", " ").slice(0, 16)} – {counter.proposed_end?.replace("T", " ").slice(0, 16)}</em>
+                {isOrganizer && event.state !== "CANCELLED" && event.state !== "EXPIRED" && (
+                  <>
+                    <button onClick={() => props.onAcceptCounter(user)}>Re-anclar</button>
+                    <button onClick={() => props.onDeclineCounter(user)}>Rechazar propuesta</button>
+                  </>
+                )}
               </div>
             ))}
           </section>

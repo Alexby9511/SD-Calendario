@@ -1,6 +1,6 @@
 import type { Envelope, SyncEntry } from "../types/protocol";
 
-export type OutboxStatus = "PENDING" | "SENT" | "409 Conflict" | "503 Retry" | "Rejected";
+export type OutboxStatus = "PENDING" | "SENT" | "STALE" | "409 Conflict" | "503 Retry" | "Rejected";
 
 export interface OutboxItem {
   envelope: Envelope;
@@ -11,7 +11,11 @@ export interface OutboxItem {
 }
 
 const OUTBOX_KEY = "sd-calendar-outbox";
-const CURSOR_KEY = "sd-calendar-sync-cursor";
+const CURSOR_PREFIX = "sd-calendar-sync-cursor";
+
+function cursorKey(deployment: string, user: string): string {
+  return `${CURSOR_PREFIX}:${encodeURIComponent(deployment)}:${encodeURIComponent(user)}`;
+}
 
 export function getOutbox(): OutboxItem[] {
   return JSON.parse(localStorage.getItem(OUTBOX_KEY) ?? "[]");
@@ -39,17 +43,22 @@ export function updateOutbox(msgId: string, patch: Partial<OutboxItem>) {
   localStorage.setItem(OUTBOX_KEY, JSON.stringify(items));
 }
 
-export function getCursor(): number {
-  return Number(localStorage.getItem(CURSOR_KEY) ?? "0");
+export function getCursor(deployment: string, user: string): number {
+  return Number(localStorage.getItem(cursorKey(deployment, user)) ?? "0");
 }
 
-export function reconcile(entries: SyncEntry[], next: number): number {
-  let cursor = getCursor();
+export function advanceCursor(
+  entries: SyncEntry[],
+  next: number,
+  deployment: string,
+  user: string
+): number {
+  let cursor = getCursor(deployment, user);
   if (!Number.isInteger(next) || next < cursor) throw new Error("Invalid sync cursor");
   if (entries.some((entry) => entry.index <= cursor || entry.index > next)) {
     throw new Error("Sync entry is outside the reconciled cursor range");
   }
   cursor = next;
-  localStorage.setItem(CURSOR_KEY, String(cursor));
+  localStorage.setItem(cursorKey(deployment, user), String(cursor));
   return cursor;
 }

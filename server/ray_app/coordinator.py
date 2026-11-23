@@ -32,7 +32,7 @@ class CoordinatorState:
         }
 
     def snapshot(self) -> Dict[str, Any]:
-        return self.fsm.snapshot()
+        return self.fsm.read_snapshot()
 
     def availability(
         self,
@@ -47,17 +47,26 @@ class CoordinatorState:
         return self.fsm.conflicts(user, start, end, exclude_uid)
 
     def sync(
-        self, since: int = 0, limit: int = 100, user_id: Optional[str] = None
+        self,
+        since: int = 0,
+        limit: int = 100,
+        user_id: Optional[str] = None,
+        include_snapshot: bool = True,
     ) -> Dict[str, Any]:
         if user_id is not None:
-            return self.fsm.sync_for(user_id, since, limit)
+            return self.fsm.sync_for(user_id, since, limit, include_snapshot)
         return self.fsm.sync(since, limit)
 
+    def has_expired_events(self, now: str) -> bool:
+        return self.fsm.has_expired_events(now)
+
     def status(self) -> Dict[str, Any]:
-        snapshot = self.snapshot()
+        snapshot = self.fsm.read_snapshot()
         return {
             "service": "sd-calendario",
-            "middleware": "ray",
+            "middleware": (
+                "ray" if ray is not None and ray.is_initialized() else "local"
+            ),
             "coordinator_alive": True,
             "applied_index": snapshot["applied_index"],
             "event_count": len(snapshot["events"]),

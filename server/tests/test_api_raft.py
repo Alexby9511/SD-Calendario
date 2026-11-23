@@ -56,6 +56,8 @@ class FakeCluster:
         }
 
     def availability(self, users=None, start=None, end=None, viewer=None):
+        if self.error is not None:
+            raise self.error
         selected = users or ["alice"]
         return {
             "users": {
@@ -66,9 +68,11 @@ class FakeCluster:
         }
 
     def conflicts(self, user, start, end, exclude_uid=None):
+        if self.error is not None:
+            raise self.error
         return {"user": user, "conflicts": [], "as_of": 1}
 
-    def sync(self, since=0, limit=100, user_id=None):
+    def sync(self, since=0, limit=100, user_id=None, include_snapshot=True):
         return {"entries": [], "next": since, "as_of": 1}
 
 
@@ -190,7 +194,73 @@ def test_reads_are_served_by_the_cluster(client):
 def test_legacy_path_serves_without_cluster(client):
     response = client.post("/v1/commands", json=command(), headers=headers())
     assert response.status_code == 200
-    assert client.get("/v1/status", headers=headers()).json()["middleware"] == "ray"
+    assert client.get("/v1/status", headers=headers()).json()["middleware"] == "local"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/availability?users=alice",
+        "/v1/conflicts?user=alice&start=2026-11-21T09:00:00Z&end=2026-11-21T10:00:00Z",
+    ],
+)
+def test_calendar_query_timeouts_return_503(client, path):
+    api.set_cluster(FakeCluster(error=TimeoutError("query timed out")))
+
+    response = client.get(path, headers=headers())
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["reason"] == "query_timeout"
+
+
+def test_ray_get_timeout_returns_503(client):
+    if api.ray is None:
+        pytest.skip("Ray is unavailable")
+    timeout_type = getattr(api.ray.exceptions, "GetTimeoutError", None)
+    if not isinstance(timeout_type, type):
+        pytest.skip("Ray GetTimeoutError is unavailable")
+    api.set_cluster(FakeCluster(error=timeout_type("query timed out")))
+
+    response = client.get("/v1/availability?users=alice", headers=headers())
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["reason"] == "query_timeout"
+
+
+def test_sync_rejects_limits_over_one_thousand(client):
+    response = client.get("/v1/sync?limit=1001", headers=headers())
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "invalid_sync_limit"
+
+
+def test_cluster_status_exposes_leader_applied_index():
+    from server.ray_app.raft_cluster import RaftCluster
+
+    cluster = RaftCluster(["n0", "n1"])
+    statuses = {
+        "n0": {"role": "leader", "last_applied": 12},
+        "n1": {"role": "follower", "last_applied": 11},
+    }
+    cluster.statuses = lambda: statuses
+    cluster.leader = lambda known: "n0"
+
+    assert cluster.status()["applied_index"] == 12
+
+
+def test_cluster_sync_reads_one_page_without_snapshot_copy():
+    from server.ray_app.raft_cluster import RaftCluster
+
+    cluster = RaftCluster(["n0"])
+    cluster.call_leader = lambda method, *args: (method, *args)
+
+    assert cluster.sync(7, 25, "alice", False) == (
+        "sync",
+        7,
+        25,
+        "alice",
+        False,
+    )
 
 
 def test_private_event_details_are_hidden_from_other_users(client):

@@ -6,6 +6,7 @@ from server.ray_app.consensus.messages import InstallSnapshot, LogEntry, Request
 from server.ray_app.consensus.node import RaftNode, Role
 from server.ray_app.consensus.storage import SQLiteStorage
 from server.ray_app.consensus.transport import InMemoryNetwork
+from server.ray_app.state import CalendarState
 
 
 class Counter:
@@ -193,5 +194,106 @@ def test_snapshot_survives_restart_and_restores_state(tmp_path):
         assert restarted.commit_index == 1
         assert restarted.last_applied == 1
         assert restored.value == 2
+    finally:
+        storage.close()
+
+
+def test_restart_and_new_leader_commits_recovered_calendar_state(tmp_path):
+    clock = FakeClock()
+    network = InMemoryNetwork()
+    node_ids = ("n0", "n1", "n2")
+
+    def create_replicas():
+        nodes = {}
+        machines = {}
+        storages = {}
+        for node_id in node_ids:
+            machine = CalendarState()
+            storage = SQLiteStorage(tmp_path / f"{node_id}.db")
+            node = RaftNode(
+                node_id,
+                [peer for peer in node_ids if peer != node_id],
+                network,
+                clock=clock,
+                random_source=random.Random(20 + int(node_id[1:])),
+                apply_command=machine.apply,
+                storage=storage,
+                snapshot_provider=machine.snapshot,
+                snapshot_restorer=machine.restore,
+            )
+            network.register(node_id, node.handle_message)
+            nodes[node_id] = node
+            machines[node_id] = machine
+            storages[node_id] = storage
+        return nodes, machines, storages
+
+    nodes, _, storages = create_replicas()
+    nodes["n0"].start_election()
+    command = {
+        "deployment_id": "dep1",
+        "group_id": "team",
+        "msg_id": "01J00000000000000000000050",
+        "type": "REQUEST",
+        "uid": "alice:01J00000000000000000000051",
+        "sender_id": "alice",
+        "key_id": "key1",
+        "sequence": 1,
+        "seen_sequence": 0,
+        "client_sent_at": "2026-11-21T00:00:00Z",
+        "payload": {"kind": "personal", "title": "Recovered"},
+    }
+    assert nodes["n0"].propose(command)["code"] == 200
+    nodes["n0"].send_heartbeats()
+    for node_id in node_ids:
+        storages[node_id].close()
+        network.unregister(node_id)
+
+    restarted, machines, storages = create_replicas()
+    try:
+        assert all(node.commit_index == node.last_applied == 0 for node in restarted.values())
+        restarted["n1"].start_election()
+
+        assert restarted["n1"].role is Role.LEADER
+        assert restarted["n1"].commit_index == 2
+        assert restarted["n1"].last_applied == 2
+        assert command["uid"] in machines["n1"].fsm.events
+        assert machines["n1"].fsm.applied_index == 1
+        assert len(machines["n1"].fsm.log) == 1
+        assert all(
+            command["uid"] in machine.fsm.events for machine in machines.values()
+        )
+        noop = restarted["n1"].log.entry(2)
+        assert noop.command == {"_raft_internal": "noop"}
+        assert noop.term == 2
+        assert restarted["n1"]._results[2] == {"ok": True, "internal": "noop"}
+    finally:
+        for storage in storages.values():
+            storage.close()
+
+
+def test_snapshot_threshold_compacts_automatically(tmp_path):
+    path = tmp_path / "raft.db"
+    machine = Counter()
+    storage = SQLiteStorage(path)
+    node = RaftNode(
+        "n0",
+        [],
+        InMemoryNetwork(),
+        clock=FakeClock(),
+        apply_command=machine.apply,
+        storage=storage,
+        snapshot_provider=machine.snapshot,
+        snapshot_restorer=machine.restore,
+        snapshot_threshold=2,
+    )
+    try:
+        node.start_election()
+        for _ in range(3):
+            assert node.propose({"delta": 1}) is not None
+
+        assert node.log.snapshot_index == 3
+        assert node.log.entries == []
+        assert storage.load_snapshot() == (3, 1, b'{"value":3}')
+        assert storage.load_log() == []
     finally:
         storage.close()

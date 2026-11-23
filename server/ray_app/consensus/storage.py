@@ -59,8 +59,13 @@ class Storage(Protocol):
     def load_log(self) -> List[LogEntry]:
         """Return the stored entries ordered by index."""
 
-    def save_log(self, entries: Iterable[LogEntry], replace: bool = False) -> None:
-        """Persist entries atomically, optionally replacing the whole log."""
+    def save_log(
+        self,
+        entries: Iterable[LogEntry],
+        replace: bool = False,
+        truncate_from: Optional[int] = None,
+    ) -> None:
+        """Persist changed entries atomically, optionally replacing a suffix."""
 
     def save_snapshot(
         self,
@@ -139,13 +144,24 @@ class SQLiteStorage:
             for row in rows
         ]
 
-    def save_log(self, entries: Iterable[LogEntry], replace: bool = False) -> None:
+    def save_log(
+        self,
+        entries: Iterable[LogEntry],
+        replace: bool = False,
+        truncate_from: Optional[int] = None,
+    ) -> None:
+        if replace and truncate_from is not None:
+            raise ValueError("raft: cannot replace and truncate the log together")
         rows = [
             (entry.index, entry.term, _encode(entry.command)) for entry in entries
         ]
         with self._lock, self._connection:
             if replace:
                 self._connection.execute("DELETE FROM log")
+            elif truncate_from is not None:
+                self._connection.execute(
+                    "DELETE FROM log WHERE idx >= ?", (truncate_from,)
+                )
             self._connection.executemany(
                 "INSERT OR REPLACE INTO log(idx, term, command) VALUES (?, ?, ?)",
                 rows,

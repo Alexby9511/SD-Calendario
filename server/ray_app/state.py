@@ -47,6 +47,10 @@ class CalendarState:
     def snapshot(self) -> bytes:
         return canonical_bytes(self.fsm.snapshot())
 
+    def read_snapshot(self) -> Dict[str, Any]:
+        """Return the domain projection without its sync history."""
+        return self.fsm.read_snapshot()
+
     def restore(self, data: bytes) -> None:
         self.fsm = CalendarFSM.from_snapshot(
             json.loads(data.decode("utf-8"))
@@ -71,8 +75,15 @@ class CalendarState:
         return self.fsm.conflicts(user, start, end, exclude_uid)
 
     def sync(
-        self, since: int = 0, limit: int = 100, user_id: Optional[str] = None
+        self,
+        since: int = 0,
+        limit: int = 100,
+        user_id: Optional[str] = None,
+        include_snapshot: bool = True,
     ) -> Dict[str, Any]:
         if user_id is not None:
-            return self.fsm.sync_for(user_id, since, limit)
+            return self.fsm.sync_for(user_id, since, limit, include_snapshot)
         return self.fsm.sync(since, limit)
+
+    def has_expired_events(self, now: str) -> bool:
+        return self.fsm.has_expired_events(now)

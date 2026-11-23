@@ -8,7 +8,7 @@ import { EventDetailModal } from "./components/EventDetailModal";
 import { DistributedInspector } from "./components/DistributedInspector";
 import { ulid } from "./lib/canonical";
 import { ensureDeviceKeys, keyIdFor, signEnvelope } from "./lib/crypto";
-import { getCursor, getOutbox, reconcile, enqueue, updateOutbox } from "./lib/outbox";
+import { getCursor, getOutbox, advanceCursor, enqueue, updateOutbox } from "./lib/outbox";
 import { applyCommand, availability, getStatus, sync as syncServer } from "./lib/api";
 import type { Envelope, EnvelopeType, GroupEvent, SyncEntry } from "./types/protocol";
 
@@ -74,7 +74,7 @@ export default function App() {
     }
   });
   const [outbox, setOutbox] = useState(getOutbox());
-  const [cursor, setCursor] = useState(getCursor());
+  const [cursor, setCursor] = useState(() => getCursor(deployment, user));
   const [entries, setEntries] = useState<SyncEntry[]>([]);
   const [syncError, setSyncError] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -224,6 +224,7 @@ export default function App() {
     setCounters({});
     setCalendarShares([]);
     setAvailabilityMap({});
+    setCursor(getCursor(deployment, nextUser));
     setUserState(nextUser);
   };
 
@@ -320,7 +321,15 @@ export default function App() {
           if (response.code === 200) {
             updateOutbox(item.envelope.msg_id, { state: "SENT", error: undefined });
           } else if (response.code === 409) {
-            updateOutbox(item.envelope.msg_id, { state: "409 Conflict", error: String(response.result?.reason ?? "") });
+            const reason = String(response.result?.reason ?? "");
+            if (reason === "stale_sequence" || response.result?.stale === true) {
+              updateOutbox(item.envelope.msg_id, {
+                state: "STALE",
+                error: "La secuencia del evento cambió. Revisa el evento y vuelve a aplicar la edición."
+              });
+            } else {
+              updateOutbox(item.envelope.msg_id, { state: "409 Conflict", error: reason });
+            }
           } else if (response.code === 503) {
             updateOutbox(item.envelope.msg_id, { state: "503 Retry", attempts: item.attempts + 1, error: String(response.result?.reason ?? "") });
           } else {
@@ -335,8 +344,8 @@ export default function App() {
         }
       }
 
-      let since = getCursor();
-      let page = await syncServer(token, since, 100);
+      let since = getCursor(deployment, user);
+      let page = await syncServer(token, since, 100, false);
       const allEntries: SyncEntry[] = [];
       let pages = 0;
       while (true) {
@@ -345,19 +354,22 @@ export default function App() {
         if (page.next === since || page.next >= page.as_of) break;
         since = page.next;
         if (++pages >= 100) throw new Error("La sincronización superó el límite de páginas.");
-        page = await syncServer(token, since, 100);
+        page = await syncServer(token, since, 100, false);
       }
+      const snapshotPage = await syncServer(token, page.next, 1000, true);
+      if (snapshotPage.next < page.next) throw new Error("El cursor del servidor retrocedió.");
+      allEntries.push(...snapshotPage.entries);
       if (activeUser.current !== user) return;
-      const next = reconcile(allEntries, page.next);
+      const next = advanceCursor(allEntries, snapshotPage.next, deployment, user);
       setCursor(next);
       setEntries(allEntries);
-      const serverEvents = Object.values(page.snapshot?.events ?? {});
-      const serverAttendance = page.snapshot?.attendance ?? {};
-      const serverCounters = page.snapshot?.counters ?? {};
+      const serverEvents = Object.values(snapshotPage.snapshot?.events ?? {});
+      const serverAttendance = snapshotPage.snapshot?.attendance ?? {};
+      const serverCounters = snapshotPage.snapshot?.counters ?? {};
       const pendingItems = getOutbox().filter((item) =>
         item.state === "PENDING" || item.state === "503 Retry"
       );
-      const reconciledShares = [...(page.snapshot?.calendar_shares ?? [])];
+      const reconciledShares = [...(snapshotPage.snapshot?.calendar_shares ?? [])];
       for (const { envelope } of pendingItems.filter(({ envelope }) =>
         envelope.type === "SHARE_CALENDAR"
         && (envelope.sender_id === user
@@ -423,9 +435,12 @@ export default function App() {
           [envelope.uid]: { ...current[envelope.uid], [envelope.sender_id]: partstat }
         }));
       }
-      setStatusIndex(page.as_of);
+      setStatusIndex(snapshotPage.as_of);
       setOnline(true);
-      setSyncError("");
+      const staleOutboxItems = getOutbox().filter((item) => item.state === "STALE");
+      setSyncError(staleOutboxItems.length > 0
+        ? "Se rechazó un cambio por secuencia obsoleta. El calendario se sincronizó; revisa el Outbox y vuelve a aplicar la edición."
+        : "");
       setOutbox(getOutbox());
     } catch (error) {
       if (activeUser.current === user) {
@@ -487,6 +502,13 @@ export default function App() {
     setEvents((current) => existing
       ? current.map((item) => item.uid === uid ? event : item)
       : [...current, event]);
+    if (existing) {
+      setCounters((current) => {
+        const next = { ...current };
+        delete next[uid];
+        return next;
+      });
+    }
     await queueEnvelope(envelope);
     setEditingEvent(null);
     setCreateOpen(false);
@@ -521,6 +543,13 @@ export default function App() {
     setEvents((current) => existing
       ? current.map((item) => item.uid === uid ? event : item)
       : [...current, event]);
+    if (existing) {
+      setCounters((current) => {
+        const next = { ...current };
+        delete next[uid];
+        return next;
+      });
+    }
     await queueEnvelope(envelope);
     setEditingEvent(null);
     setCreateOpen(false);
@@ -544,16 +573,18 @@ export default function App() {
   };
 
   const sendSimpleCommand = async (
-    type: "COUNTER" | "CANCEL" | "CLOSE_POLL" | "REOPEN",
-    counter?: { start: string; end: string }
+    type: "COUNTER" | "CANCEL" | "CLOSE_POLL" | "REOPEN" | "REANCHOR" | "DECLINECOUNTER",
+    options?: { start?: string; end?: string; counterUser?: string }
   ) => {
     if (!currentDetailEvent) return;
     const payload = type === "COUNTER"
-      ? { proposed_start: counter?.start, proposed_end: counter?.end }
-      : type === "REOPEN"
+      ? { proposed_start: options?.start, proposed_end: options?.end }
+      : type === "REANCHOR" || type === "DECLINECOUNTER"
+        ? { counter_user: options?.counterUser }
+        : type === "REOPEN"
         ? { extend_deadline: true, reask: true }
         : {};
-    const envelope = await buildEnvelope(type, currentDetailEvent.uid, currentDetailEvent.sequence, payload);
+    const envelope = await buildEnvelope(type, currentDetailEvent.uid, currentDetailEvent.sequence + 1, payload);
     await queueEnvelope(envelope);
   };
 
@@ -667,6 +698,8 @@ export default function App() {
         currentUser={user} canEdit={canEditDetailEvent}
         onClose={() => setDetailEvent(null)} onReply={sendReply}
         onCounter={(start, end) => sendSimpleCommand("COUNTER", { start, end })}
+        onAcceptCounter={(counterUser) => sendSimpleCommand("REANCHOR", { counterUser })}
+        onDeclineCounter={(counterUser) => sendSimpleCommand("DECLINECOUNTER", { counterUser })}
         onClosePoll={() => sendSimpleCommand("CLOSE_POLL")}
         onReopen={() => sendSimpleCommand("REOPEN")}
         onCancel={() => sendSimpleCommand("CANCEL")}

@@ -116,7 +116,7 @@ def test_ray_cluster_elects_leader_and_commits(cluster):
         assert snapshot["applied_index"] == 1
         assert "alice:01J00000000000000000000011" in snapshot["events"]
 
-    calendar = RaftCluster(list(actors), namespace=namespace)
+    calendar = RaftCluster(list(actors), namespace=namespace, timeout=10.0)
     assert calendar.sync(0)["entries"][0]["index"] == 1
     assert calendar.conflicts(
         "alice", "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z"

@@ -72,6 +72,7 @@ function stateLabel(state: GroupEvent["state"]) {
 }
 
 export function CalendarGrid(props: Props) {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [now, setNow] = useState(() => new Date());
   const [gridWidth, setGridWidth] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -322,7 +323,7 @@ export function CalendarGrid(props: Props) {
 
   return (
     <main ref={gridRef} className={`calendar-grid ${props.view === "Día" ? "day-view" : ""}`}>
-      <div className="timezone">GMT−4</div>
+      <div className="timezone">{timezone}</div>
       {days.map((day, i) => (
         <div key={i} className="day-heading">
           <span>{day.toLocaleDateString("es", { weekday: "short" }).toUpperCase()}</span>

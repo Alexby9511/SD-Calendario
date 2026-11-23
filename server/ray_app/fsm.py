@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 
 from pkg.protocol.envelope import Envelope
 
+MAX_SYNC_LIMIT = 1000
+
 
 class CalendarFSM:
     """Deterministic, in-memory state machine. No clocks or randomness."""
@@ -14,7 +16,7 @@ class CalendarFSM:
         self.counters: Dict[str, Dict[str, Any]] = {}
         self.calendar_shares: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.busy: Dict[str, Dict[str, Any]] = {}
-        self.seen: Dict[str, Dict[str, Any]] = {}
+        self.seen: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.log: List[Dict[str, Any]] = []
         self.applied_index = 0
 
@@ -23,8 +25,12 @@ class CalendarFSM:
         envelope.validate()
 
         msg_id = envelope.msg_id
-        if msg_id in self.seen:
-            previous = copy.deepcopy(self.seen[msg_id])
+        sender_seen = self.seen.get(envelope.sender_id, {})
+        previous = sender_seen.get(msg_id)
+        if previous is None:
+            previous = self.seen.get("*", {}).get(msg_id)
+        if previous is not None:
+            previous = copy.deepcopy(previous)
             return {
                 "code": 200,
                 "deduplicated": True,
@@ -39,7 +45,9 @@ class CalendarFSM:
         elif envelope.type == "COUNTER":
             result = self._counter(envelope)
         elif envelope.type == "DECLINECOUNTER":
-            result = {"code": 422, "reason": "unsupported_command"}
+            result = self._decline_counter(envelope)
+        elif envelope.type == "REANCHOR":
+            result = self._reanchor(envelope)
         elif envelope.type == "CANCEL":
             result = self._cancel(envelope)
         elif envelope.type == "CLOSE_POLL":
@@ -51,7 +59,7 @@ class CalendarFSM:
         elif envelope.type == "SHARE_CALENDAR":
             result = self._share_calendar(envelope)
         elif envelope.type == "EVALUATE":
-            result = {"ok": True, "type": "EVALUATE"}
+            result = self._evaluate(envelope)
         else:
             result = {"code": 422, "reason": "unsupported_command"}
 
@@ -65,7 +73,7 @@ class CalendarFSM:
             }
 
         self.applied_index += 1
-        self.seen[msg_id] = {
+        self.seen.setdefault(envelope.sender_id, {})[msg_id] = {
             "applied_index": self.applied_index,
             "result": copy.deepcopy(result),
         }
@@ -126,7 +134,7 @@ class CalendarFSM:
         if not self._can_edit_event(existing, envelope.sender_id):
             return {"code": 403, "reason": "organizer_only"}
         if envelope.sequence <= existing["sequence"]:
-            return {"ok": True, "uid": uid, "state": existing["state"], "stale": True}
+            return {"code": 409, "reason": "stale_sequence"}
         if existing["state"] in ("EXPIRED", "CANCELLED"):
             code = 410 if existing["state"] == "CANCELLED" else 409
             return {"code": code, "reason": "terminal_event"}
@@ -141,6 +149,7 @@ class CalendarFSM:
         existing["payload"] = payload
         existing["visibility"] = payload["visibility"]
         existing["participants"] = participants
+        self.counters.pop(uid, None)
         if existing["kind"] == "group":
             self.attendance[uid] = {}
             existing["state"] = "PROPOSED"
@@ -183,12 +192,15 @@ class CalendarFSM:
         event = self.events.get(envelope.uid)
         if event is None:
             return {"code": 409, "reason": "unknown_event"}
+        if envelope.sender_id not in event["participants"]:
+            return {"code": 403, "reason": "not_an_attendee"}
+        sequence_error = self._next_event_sequence(event, envelope.sequence)
+        if sequence_error:
+            return sequence_error
         if event["state"] in ("EXPIRED", "CANCELLED"):
             return {"code": 410, "reason": "terminal_event"}
         if event["state"] != "PROPOSED":
             return {"code": 409, "reason": "poll_closed"}
-        if envelope.sender_id not in event["participants"]:
-            return {"code": 403, "reason": "not_an_attendee"}
         start = envelope.payload.get("proposed_start")
         end = envelope.payload.get("proposed_end")
         if not self._valid_window(start, end):
@@ -198,7 +210,106 @@ class CalendarFSM:
         self.counters.setdefault(envelope.uid, {})[envelope.sender_id] = copy.deepcopy(
             envelope.payload
         )
+        event["sequence"] = envelope.sequence
         return {"ok": True, "uid": envelope.uid, "counter": envelope.payload}
+
+    def _decline_counter(self, envelope: Envelope) -> Dict[str, Any]:
+        event = self.events.get(envelope.uid)
+        if event is None:
+            return {"code": 409, "reason": "unknown_event"}
+        if event["organizer"] != envelope.sender_id:
+            return {"code": 403, "reason": "organizer_only"}
+        sequence_error = self._next_event_sequence(event, envelope.sequence)
+        if sequence_error:
+            return sequence_error
+        counter_user = envelope.payload.get("counter_user")
+        counters = self.counters.get(envelope.uid, {})
+        if not isinstance(counter_user, str) or counter_user not in counters:
+            return {"code": 409, "reason": "unknown_counter"}
+        del counters[counter_user]
+        if not counters:
+            self.counters.pop(envelope.uid, None)
+        event["sequence"] = envelope.sequence
+        return {
+            "ok": True,
+            "uid": envelope.uid,
+            "counter_user": counter_user,
+            "state": event["state"],
+        }
+
+    def _reanchor(self, envelope: Envelope) -> Dict[str, Any]:
+        event = self.events.get(envelope.uid)
+        if event is None:
+            return {"code": 409, "reason": "unknown_event"}
+        if event["organizer"] != envelope.sender_id:
+            return {"code": 403, "reason": "organizer_only"}
+        sequence_error = self._next_event_sequence(event, envelope.sequence)
+        if sequence_error:
+            return sequence_error
+        if event["state"] in ("CANCELLED", "EXPIRED"):
+            return {"code": 410, "reason": "terminal_event"}
+        counter_user = envelope.payload.get("counter_user")
+        if not isinstance(counter_user, str):
+            return {"code": 409, "reason": "unknown_counter"}
+        counter = self.counters.get(envelope.uid, {}).get(counter_user)
+        if counter is None:
+            return {"code": 409, "reason": "unknown_counter"}
+        start = counter.get("proposed_start")
+        end = counter.get("proposed_end")
+        if not self._valid_window(start, end):
+            return {"code": 422, "reason": "invalid_counter_window"}
+        if self._has_conflict(
+            envelope.sender_id,
+            {"start": start, "end": end},
+            exclude_uid=envelope.uid,
+        ):
+            return {"code": 409, "reason": "organizer_schedule_conflict"}
+        event["payload"]["start"] = start
+        event["payload"]["end"] = end
+        event["payload"]["deadline_utc"] = start
+        event["sequence"] = envelope.sequence
+        event["state"] = "PROPOSED"
+        self.attendance[envelope.uid] = {}
+        self.counters.pop(envelope.uid, None)
+        return {
+            "ok": True,
+            "uid": envelope.uid,
+            "state": "PROPOSED",
+            "start": start,
+            "end": end,
+        }
+
+    def _evaluate(self, envelope: Envelope) -> Dict[str, Any]:
+        if envelope.sender_id != "system":
+            return {"code": 403, "reason": "system_command_only"}
+        now = self._parse_datetime(envelope.payload.get("now"))
+        if now is None:
+            return {"code": 422, "reason": "invalid_evaluation_time"}
+        expired = []
+        for uid, event in self.events.items():
+            deadline = self._parse_datetime(event["payload"].get("deadline_utc"))
+            if (
+                event["state"] == "PROPOSED"
+                and deadline is not None
+                and deadline <= now
+            ):
+                event["state"] = "EXPIRED"
+                event["sequence"] += 1
+                self.counters.pop(uid, None)
+                expired.append(uid)
+        return {"ok": True, "type": "EVALUATE", "expired": expired}
+
+    def has_expired_events(self, now: str) -> bool:
+        evaluated_at = self._parse_datetime(now)
+        if evaluated_at is None:
+            return False
+        return any(
+            event["state"] == "PROPOSED"
+            and (deadline := self._parse_datetime(event["payload"].get("deadline_utc")))
+            is not None
+            and deadline <= evaluated_at
+            for event in self.events.values()
+        )
 
     def _close_poll(self, envelope: Envelope) -> Dict[str, Any]:
         event = self.events.get(envelope.uid)
@@ -206,6 +317,9 @@ class CalendarFSM:
             return {"code": 409, "reason": "unknown_event"}
         if event["organizer"] != envelope.sender_id:
             return {"code": 403, "reason": "organizer_only"}
+        sequence_error = self._next_event_sequence(event, envelope.sequence)
+        if sequence_error:
+            return sequence_error
         if event["state"] != "PROPOSED":
             return {"code": 409, "reason": "poll_closed"}
         if (
@@ -215,6 +329,7 @@ class CalendarFSM:
             event["state"] = "CONFIRMED"
         else:
             event["state"] = "NOT_CONFIRMED"
+        event["sequence"] = envelope.sequence
         return {"ok": True, "uid": envelope.uid, "state": event["state"]}
 
     def _reopen(self, envelope: Envelope) -> Dict[str, Any]:
@@ -223,11 +338,15 @@ class CalendarFSM:
             return {"code": 409, "reason": "unknown_event"}
         if event["organizer"] != envelope.sender_id:
             return {"code": 403, "reason": "organizer_only"}
+        sequence_error = self._next_event_sequence(event, envelope.sequence)
+        if sequence_error:
+            return sequence_error
         if event["state"] in ("CANCELLED", "EXPIRED"):
             return {"code": 410, "reason": "terminal_event"}
         if event["state"] == "PROPOSED":
             return {"code": 409, "reason": "poll_already_open"}
         event["state"] = "PROPOSED"
+        event["sequence"] = envelope.sequence
         if envelope.payload.get("reask", True):
             self.attendance[envelope.uid] = {}
         return {"ok": True, "uid": envelope.uid, "state": "PROPOSED"}
@@ -275,10 +394,25 @@ class CalendarFSM:
             return {"code": 409, "reason": "unknown_event"}
         if not self._can_edit_event(event, envelope.sender_id):
             return {"code": 403, "reason": "organizer_only"}
+        sequence_error = self._next_event_sequence(event, envelope.sequence)
+        if sequence_error:
+            return sequence_error
+        event["sequence"] = envelope.sequence
         if event["state"] == "CANCELLED":
             return {"ok": True, "uid": envelope.uid, "state": "CANCELLED", "idempotent": True}
         event["state"] = "CANCELLED"
         return {"ok": True, "uid": envelope.uid, "state": "CANCELLED"}
+
+    @staticmethod
+    def _next_event_sequence(
+        event: Dict[str, Any], sequence: int
+    ) -> Optional[Dict[str, Any]]:
+        current = event["sequence"]
+        if sequence <= current:
+            return {"code": 409, "reason": "stale_sequence"}
+        if sequence != current + 1:
+            return {"code": 409, "reason": "sequence_gap"}
+        return None
 
     def _busy_update(self, envelope: Envelope) -> Dict[str, Any]:
         pub_seq = envelope.payload.get("pub_seq")
@@ -400,7 +534,18 @@ class CalendarFSM:
         return {"user": user, "conflicts": matches, "as_of": self.applied_index}
 
     def sync(self, since: int = 0, limit: int = 100) -> Dict[str, Any]:
-        if since < 0 or limit <= 0:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit <= 0
+            or limit > MAX_SYNC_LIMIT
+        ):
+            raise ValueError("invalid_sync_limit")
+        if (
+            not isinstance(since, int)
+            or isinstance(since, bool)
+            or since < 0
+        ):
             raise ValueError("invalid_sync_cursor")
         scanned = [item for item in self.log if item["index"] > since][:limit]
         entries = [
@@ -412,7 +557,11 @@ class CalendarFSM:
         return {"entries": copy.deepcopy(entries), "next": next_cursor, "as_of": self.applied_index}
 
     def sync_for(
-        self, user_id: str, since: int = 0, limit: int = 100
+        self,
+        user_id: str,
+        since: int = 0,
+        limit: int = 100,
+        include_snapshot: bool = True,
     ) -> Dict[str, Any]:
         page = self.sync(since, limit)
         visible_entries = []
@@ -429,6 +578,8 @@ class CalendarFSM:
                 }
             )
         page["entries"] = visible_entries
+        if not include_snapshot:
+            return page
         visible_uids = [
             uid
             for uid, event in self.events.items()
@@ -537,6 +688,12 @@ class CalendarFSM:
                 raise ValueError("event_requires_start_and_end")
             if not cls._valid_window(payload["start"], payload["end"]):
                 raise ValueError("invalid_window")
+        if kind == "group" and "start" in payload:
+            payload.setdefault("deadline_utc", payload["start"])
+        if "deadline_utc" in payload and cls._parse_datetime(
+            payload["deadline_utc"]
+        ) is None:
+            raise ValueError("invalid_deadline")
         payload["kind"] = kind
         payload["participants"] = participants
         payload["visibility"] = visibility
@@ -670,15 +827,28 @@ class CalendarFSM:
             if owner == user_id or user_id in share["users"]
         ]
 
-    def snapshot(self) -> Dict[str, Any]:
-        return {
+    def snapshot(self, include_log: bool = True) -> Dict[str, Any]:
+        snapshot = {
             "events": copy.deepcopy(self.events),
             "attendance": copy.deepcopy(self.attendance),
             "counters": copy.deepcopy(self.counters),
             "calendar_shares": copy.deepcopy(self.calendar_shares),
             "busy": copy.deepcopy(self.busy),
             "seen": copy.deepcopy(self.seen),
-            "log": copy.deepcopy(self.log),
+            "applied_index": self.applied_index,
+        }
+        if include_log:
+            snapshot["log"] = copy.deepcopy(self.log)
+        return snapshot
+
+    def read_snapshot(self) -> Dict[str, Any]:
+        """Return only the domain projection needed by calendar reads."""
+        return {
+            "events": copy.deepcopy(self.events),
+            "attendance": copy.deepcopy(self.attendance),
+            "counters": copy.deepcopy(self.counters),
+            "calendar_shares": copy.deepcopy(self.calendar_shares),
+            "busy": copy.deepcopy(self.busy),
             "applied_index": self.applied_index,
         }
 
@@ -690,7 +860,14 @@ class CalendarFSM:
         fsm.counters = copy.deepcopy(snapshot.get("counters", {}))
         fsm.calendar_shares = copy.deepcopy(snapshot.get("calendar_shares", {}))
         fsm.busy = copy.deepcopy(snapshot.get("busy", {}))
-        fsm.seen = copy.deepcopy(snapshot.get("seen", {}))
+        stored_seen = copy.deepcopy(snapshot.get("seen", {}))
+        if stored_seen and all(
+            isinstance(value, dict) and "applied_index" in value
+            for value in stored_seen.values()
+        ):
+            fsm.seen = {"*": stored_seen}
+        else:
+            fsm.seen = stored_seen
         fsm.log = copy.deepcopy(snapshot.get("log", []))
         fsm.applied_index = int(snapshot.get("applied_index", 0))
         return fsm

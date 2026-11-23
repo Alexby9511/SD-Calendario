@@ -8,10 +8,13 @@ from deadlocking two actors.
 """
 
 import json
+import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Tuple
 
 from .consensus.clock import RealClock
-from .consensus.node import RaftNode
+from .consensus.node import RaftNode, Role
 from .consensus.storage import SQLiteStorage
 from .raft_placement import placement_options
 from .raft_startup import create_named_actor
@@ -59,7 +62,11 @@ class ReplicatedState(Protocol):
         """Return the events of ``user`` that overlap the given window."""
 
     def sync(
-        self, since: int = 0, limit: int = 100, user_id: Optional[str] = None
+        self,
+        since: int = 0,
+        limit: int = 100,
+        user_id: Optional[str] = None,
+        include_snapshot: bool = True,
     ) -> Dict[str, Any]:
         """Return the applied entries after the given cursor."""
 
@@ -94,12 +101,39 @@ class RaftReplica:
             snapshot_provider=self.state.snapshot,
             snapshot_restorer=self.state.restore,
         )
+        self._next_expiration_check = 0.0
 
     def handle_message(self, message: Any) -> Any:
         return self.node.handle_message(message)
 
     def tick(self) -> None:
         self.node.tick()
+        now_monotonic = time.monotonic()
+        if (
+            self.node.role is not Role.LEADER
+            or now_monotonic < self._next_expiration_check
+        ):
+            return
+        self._next_expiration_check = now_monotonic + 1.0
+        now = datetime.now(timezone.utc).isoformat()
+        has_expired_events = getattr(self.state, "has_expired_events", None)
+        if not callable(has_expired_events) or not has_expired_events(now):
+            return
+        self.node.propose(
+            {
+                "deployment_id": "sd-calendar",
+                "group_id": "system",
+                "msg_id": f"evaluate-{uuid.uuid4().hex}",
+                "type": "EVALUATE",
+                "uid": "system:calendar",
+                "sender_id": "system",
+                "key_id": "",
+                "sequence": 0,
+                "seen_sequence": 0,
+                "client_sent_at": now,
+                "payload": {"now": now},
+            }
+        )
 
     def start_election(self) -> None:
         self.node.start_election()
@@ -116,8 +150,14 @@ class RaftReplica:
     def snapshot(self) -> bytes:
         return self.state.snapshot()
 
-    def state_snapshot(self) -> Dict[str, Any]:
-        return json.loads(self.state.snapshot().decode("utf-8"))
+    def state_snapshot(self, include_log: bool = False) -> Dict[str, Any]:
+        read_snapshot = getattr(self.state, "read_snapshot", None)
+        if not include_log and callable(read_snapshot):
+            return read_snapshot()
+        snapshot = json.loads(self.state.snapshot().decode("utf-8"))
+        if not include_log:
+            snapshot.pop("log", None)
+        return snapshot
 
     def availability(
         self,
@@ -138,9 +178,13 @@ class RaftReplica:
         return self.state.conflicts(user, start, end, exclude_uid)
 
     def sync(
-        self, since: int = 0, limit: int = 100, user_id: Optional[str] = None
+        self,
+        since: int = 0,
+        limit: int = 100,
+        user_id: Optional[str] = None,
+        include_snapshot: bool = True,
     ) -> Dict[str, Any]:
-        return self.state.sync(since, limit, user_id)
+        return self.state.sync(since, limit, user_id, include_snapshot)
 
     def status(self) -> Dict[str, Any]:
         status = self.node.status()
@@ -165,7 +209,6 @@ def start_raft_cluster(
     detached: bool = True,
     get_if_exists: bool = True,
     node_assignments: Optional[Dict[str, str]] = None,
-    skip_unassigned: bool = False,
 ) -> Dict[str, Any]:
     """Start one actor per node and return ``node_id -> actor handle``.
 
@@ -180,9 +223,6 @@ def start_raft_cluster(
     ``node_assignments`` is provided, each actor is pinned to its assigned
     Ray node so that its SQLite database remains node-local.
 
-    ``skip_unassigned`` leaves out the replicas without an assignment: the
-    supervisor recreates them on their original node instead of placing them
-    somewhere else.
     """
     if ray is None or RaftActor is None:
         raise RuntimeError("raft: ray is not installed")
@@ -199,8 +239,6 @@ def start_raft_cluster(
     actors: Dict[str, Any] = {}
     for node_id in started:
         target_node = assignments.get(node_id)
-        if skip_unassigned and not target_node:
-            continue
         peers = [other for other in members if other != node_id]
         options: Dict[str, Any] = {"get_if_exists": get_if_exists}
         if detached:

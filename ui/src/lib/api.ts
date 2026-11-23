@@ -18,8 +18,18 @@ export async function applyCommand(command: Envelope, token: string): Promise<Co
   return data;
 }
 
-export async function sync(token: string, since = 0, limit = 100): Promise<SyncPage> {
-  const response = await fetch(`${API_BASE}/v1/sync?since=${since}&limit=${limit}`, {
+export async function sync(
+  token: string,
+  since = 0,
+  limit = 100,
+  includeSnapshot = true
+): Promise<SyncPage> {
+  const params = new URLSearchParams({
+    since: String(since),
+    limit: String(limit),
+    include_snapshot: String(includeSnapshot)
+  });
+  const response = await fetch(`${API_BASE}/v1/sync?${params}`, {
     headers: authHeaders(token)
   });
   if (!response.ok) throw new Error(`Sync failed: ${response.status}`);

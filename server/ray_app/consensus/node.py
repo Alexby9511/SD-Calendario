@@ -26,6 +26,9 @@ from .messages import (
 from .storage import Storage
 from .transport import TransportError
 
+DEFAULT_SNAPSHOT_THRESHOLD = 1000
+_INTERNAL_NOOP = {"_raft_internal": "noop"}
+
 
 class Role(str, Enum):
     """Raft role of a replica."""
@@ -73,7 +76,14 @@ class RaftNode:
         storage: Optional[Storage] = None,
         snapshot_provider: Optional[Callable[[], bytes]] = None,
         snapshot_restorer: Optional[Callable[[bytes], None]] = None,
+        snapshot_threshold: int = DEFAULT_SNAPSHOT_THRESHOLD,
     ) -> None:
+        if (
+            not isinstance(snapshot_threshold, int)
+            or isinstance(snapshot_threshold, bool)
+            or snapshot_threshold < 1
+        ):
+            raise ValueError("raft: snapshot threshold must be a positive integer")
         self.node_id = node_id
         self.peers = [peer for peer in peers if peer != node_id]
         self.transport = transport
@@ -81,6 +91,7 @@ class RaftNode:
         self.storage = storage
         self._snapshot_provider = snapshot_provider
         self._snapshot_restorer = snapshot_restorer
+        self._snapshot_threshold = snapshot_threshold
         self._snapshot_data: Optional[bytes] = None
         self.log = RaftLog()
         self.role = Role.FOLLOWER
@@ -226,6 +237,11 @@ class RaftNode:
         (for example, without quorum). The entry stays in the log and a later
         heartbeat can commit it.
         """
+        if command == _INTERNAL_NOOP:
+            raise ValueError("raft: internal no-op cannot be proposed by a client")
+        return self._append_and_replicate(command)
+
+    def _append_and_replicate(self, command: Dict[str, Any]) -> Any:
         if self.role is not Role.LEADER:
             raise NotLeaderError(self.leader_id)
         entry = LogEntry(
@@ -234,7 +250,7 @@ class RaftNode:
             command=command,
         )
         self.log.append(entry)
-        self._persist_log()
+        self._persist_log([entry])
         self._replicate_all()
         self._advance_commit()
         if self.commit_index >= entry.index:
@@ -274,9 +290,8 @@ class RaftNode:
         self._persist_snapshot(index, term, data)
         self.log.compact(index)
         self._snapshot_data = data
-        self._persist_log()
         self._results = {
-            key: value for key, value in self._results.items() if key > index
+            key: value for key, value in self._results.items() if key >= index
         }
         self.logger.info(
             "compacted snapshot node_id=%s index=%d term=%d",
@@ -401,12 +416,26 @@ class RaftNode:
                 conflict_index=self._first_index_of_term(message.prev_log_index),
             )
 
+        replace_from = next(
+            (
+                entry.index
+                for entry in message.entries
+                if (existing := self.log.entry(entry.index)) is not None
+                and existing.term != entry.term
+            ),
+            None,
+        )
         if not self.log.append_entries(
             message.prev_log_index, message.prev_log_term, message.entries
         ):
             return AppendEntriesResponse(self.current_term, False)
         if message.entries:
-            self._persist_log()
+            if replace_from is None:
+                self._persist_log(message.entries)
+            else:
+                self._persist_log(
+                    self.log.slice(replace_from), truncate_from=replace_from
+                )
 
         if message.leader_commit > self.commit_index:
             self.commit_index = min(message.leader_commit, self.log.last_index)
@@ -466,7 +495,7 @@ class RaftNode:
         self.last_applied = message.last_included_index
         self._snapshot_data = message.data
         self._results = {}
-        self._persist_log()
+        self._persist_log(replace=True)
         self.logger.info(
             "installed snapshot node_id=%s index=%d term=%d",
             self.node_id,
@@ -574,9 +603,18 @@ class RaftNode:
             entry = self.log.entry(index)
             if entry is None:
                 raise RuntimeError(f"raft: missing entry at index {index}")
-            result = self._apply_command(entry.command)
+            result = (
+                {"ok": True, "internal": "noop"}
+                if entry.command == _INTERNAL_NOOP
+                else self._apply_command(entry.command)
+            )
             self.last_applied = index
             self._results[index] = result
+        if (
+            self._snapshot_provider is not None
+            and self.last_applied - self.log.snapshot_index > self._snapshot_threshold
+        ):
+            self.take_snapshot()
 
     def status(self) -> Dict[str, Any]:
         """Expose election state for debugging and the API status endpoint."""
@@ -645,6 +683,8 @@ class RaftNode:
             self.current_term,
             self.log.last_index,
         )
+        if self.log.last_index > self.last_applied:
+            self._append_and_replicate(dict(_INTERNAL_NOOP))
         self.send_heartbeats()
 
     def _persist_meta(self) -> None:
@@ -656,9 +696,18 @@ class RaftNode:
                 self.log.snapshot_term,
             )
 
-    def _persist_log(self) -> None:
+    def _persist_log(
+        self,
+        entries: Optional[Iterable[LogEntry]] = None,
+        replace: bool = False,
+        truncate_from: Optional[int] = None,
+    ) -> None:
         if self.storage is not None:
-            self.storage.save_log(self.log.entries, replace=True)
+            self.storage.save_log(
+                self.log.entries if entries is None else entries,
+                replace=replace,
+                truncate_from=truncate_from,
+            )
 
     def _persist_snapshot(self, index: int, term: int, data: bytes) -> None:
         if self.storage is not None:

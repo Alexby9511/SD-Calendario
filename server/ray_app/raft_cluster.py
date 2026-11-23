@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .consensus.node import NotLeaderError
 from .consensus.transport import TransportError
-from .fsm import CalendarFSM
+from .fsm import CalendarFSM, MAX_SYNC_LIMIT
 from .raft_transport import DEFAULT_ACTOR_PREFIX, DEFAULT_NAMESPACE, actor_name
 
 try:
@@ -133,6 +133,14 @@ class RaftCluster:
             "alive_replicas": alive_replicas,
             "quorum_size": quorum_size,
             "quorum_available": alive_replicas >= quorum_size,
+            "applied_index": (
+                statuses.get(leader_id, {}).get("last_applied", 0)
+                if leader_id is not None
+                else max(
+                    (status.get("last_applied", 0) for status in statuses.values()),
+                    default=0,
+                )
+            ),
         }
 
     def call_leader(self, method: str, *args: Any) -> Any:
@@ -146,9 +154,9 @@ class RaftCluster:
             timeout=self.timeout,
         )
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, include_log: bool = False) -> Dict[str, Any]:
         """Return the state machine snapshot held by the leader."""
-        return self.call_leader("state_snapshot")
+        return self.call_leader("state_snapshot", include_log)
 
     def availability(
         self,
@@ -217,17 +225,17 @@ class RaftCluster:
         since: int = 0,
         limit: int = 100,
         user_id: Optional[str] = None,
+        include_snapshot: bool = True,
     ) -> Dict[str, Any]:
-        if since < 0 or limit <= 0:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit <= 0
+            or limit > MAX_SYNC_LIMIT
+        ):
+            raise ValueError("invalid_sync_limit")
+        if not isinstance(since, int) or isinstance(since, bool) or since < 0:
             raise ValueError("invalid_sync_cursor")
-        snapshot_ref = ray.put(self.snapshot())
-        method = "sync_for" if user_id is not None else "sync"
-        args = (
-            (user_id, since, limit)
-            if user_id is not None
-            else (since, limit)
-        )
-        return ray.get(
-            calendar_query_task.remote(snapshot_ref, method, args),
-            timeout=self.timeout,
+        return self.call_leader(
+            "sync", since, limit, user_id, include_snapshot
         )

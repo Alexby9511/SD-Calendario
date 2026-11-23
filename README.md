@@ -29,6 +29,13 @@ export SDCAL_DEMO_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsaf
 export SDCAL_API_TOKENS="$(python -c 'import json,os; print(json.dumps({"alice": os.environ["SDCAL_DEMO_TOKEN"]}))')"
 ```
 
+La identidad autorizada procede exclusivamente del token Bearer. Aunque el
+protocolo transporta `key_id` y `signature` y `Envelope.verify()` está
+disponible para uso explícito, la admisión actual no verifica firmas Ed25519 ni
+exige que `key_id` corresponda a `sender_id`; esos campos no autentican ni
+autorizan comandos. No uses este prototipo como sustituto de esa verificación
+en un despliegue que dependa de firmas de dispositivo.
+
 `visibility` admite solo `private` y `public`. La disponibilidad responde solo
 `available` o `busy`; una ruta privada muestra sus detalles únicamente al
 organizador y a los participantes. `/health` comprueba el proceso y `/ready`
@@ -77,12 +84,14 @@ El procedimiento completo está en
 un head, cinco workers y tres APIs; las escrituras se confirman mediante el
 líder Raft y el mismo `msg_id` reenviado queda deduplicado por la FSM.
 
-Las lecturas de disponibilidad, conflictos y sincronización se ejecutan como
-Ray Tasks sobre snapshots inmutables. `/v1/sync` omite los payloads
-`BUSY_UPDATE`, manteniendo un cursor que permite al cliente reanudar la
-reconciliación sin recibir ventanas de disponibilidad. La outbox SQLite
-persiste comandos completos, reintenta con el mismo `msg_id` y guarda
-atómicamente cada página reconciliada junto con su cursor.
+Las lecturas de disponibilidad y conflictos se ejecutan como Ray Tasks sobre
+snapshots inmutables. `/v1/sync` omite los payloads `BUSY_UPDATE`; las páginas
+no copian la proyección completa y el cliente la solicita una sola vez al
+terminar de leerlas. El cursor se conserva por despliegue y usuario.
+
+Las reuniones de grupo usan por defecto su hora de inicio como fecha límite
+para la votación. El líder Raft emite evaluaciones internas y marca como
+`EXPIRED` las propuestas que sigan abiertas al vencer esa fecha.
 
 El head usa GCS RocksDB persistente para recuperarse de reinicios de su
 contenedor. La recuperación de GCS con RocksDB es experimental en Ray; el

@@ -63,6 +63,18 @@ def test_save_log_appends_and_replaces(tmp_path):
         assert storage.load_log() == [entry(1, term=2), entry(2, term=2)]
 
 
+def test_save_log_replaces_only_a_conflicting_suffix(tmp_path):
+    with SQLiteStorage(tmp_path / "raft.db") as storage:
+        storage.save_log([entry(1), entry(2), entry(3)])
+
+        storage.save_log(
+            [entry(2, term=2), entry(3, term=2)],
+            truncate_from=2,
+        )
+
+        assert storage.load_log() == [entry(1), entry(2, term=2), entry(3, term=2)]
+
+
 def test_restart_restores_term_vote_and_log(tmp_path):
     path = tmp_path / "raft.db"
     node, storage = open_node(path, apply_command=lambda command: command)

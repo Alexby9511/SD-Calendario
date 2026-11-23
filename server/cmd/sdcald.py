@@ -97,6 +97,55 @@ def _wait_for_nodes(count: int, logger, timeout: float = 60.0) -> bool:
     return False
 
 
+def _recover_strict_placements(node_ids, namespace, timeout: float = 2.0):
+    """Recover known targets from live replicas or their detached supervisor."""
+    import ray
+
+    from server.ray_app.raft_placement import PlacementError
+    from server.ray_app.raft_supervisor import DEFAULT_SUPERVISOR_NAME
+    from server.ray_app.raft_transport import actor_name
+
+    placements = {}
+    try:
+        supervisor = ray.get_actor(DEFAULT_SUPERVISOR_NAME, namespace=namespace)
+        known = ray.get(supervisor.placements.remote(), timeout=timeout)
+        placements.update(
+            {
+                node_id: target
+                for node_id, target in known.items()
+                if node_id in node_ids and target
+            }
+        )
+    except Exception:
+        pass
+
+    for node_id in node_ids:
+        if node_id in placements:
+            continue
+        try:
+            actor = ray.get_actor(actor_name(node_id), namespace=namespace)
+            status = ray.get(actor.status.remote(), timeout=timeout)
+        except Exception:
+            continue
+        target = status.get("placement_key")
+        if not target and status.get("ray_node_id"):
+            target = f"node:{status['ray_node_id']}"
+        if target:
+            placements[node_id] = str(target)
+
+    missing = sorted(set(node_ids) - set(placements))
+    if missing:
+        raise PlacementError(
+            "raft: strict placement cannot safely recover targets for "
+            + ", ".join(missing)
+        )
+    if len(set(placements.values())) != len(node_ids):
+        raise PlacementError(
+            "raft: recovered strict placements are not distinct"
+        )
+    return placements
+
+
 def start_raft_cluster(
     replicas: int,
     data_dir: str,
@@ -127,7 +176,6 @@ def start_raft_cluster(
         node_id: str(base / f"{node_id}.db") for node_id in node_ids
     }
     logger = get_logger("raft.placement")
-    skip_unassigned = False
     try:
         if placement_mode == "strict" and replicas > 1:
             if not _wait_for_nodes(replicas, logger):
@@ -136,12 +184,14 @@ def start_raft_cluster(
                 )
         node_assignments = plan_node_placement(node_ids, placement_mode)
     except PlacementError as exc:
-        # The cluster is already running but some nodes are down: attach to
-        # the existing replicas and let the supervisor recreate the missing
-        # ones on their original node.
-        logger.warning("strict placement unavailable reason=%s", exc)
-        node_assignments = {}
-        skip_unassigned = True
+        if placement_mode != "strict":
+            raise
+        logger.warning(
+            "strict placement planning unavailable; recovering existing "
+            "targets reason=%s",
+            exc,
+        )
+        node_assignments = _recover_strict_placements(node_ids, namespace)
 
     if node_assignments:
         logger.info(
@@ -167,7 +217,6 @@ def start_raft_cluster(
         db_paths,
         namespace=namespace,
         node_assignments=node_assignments,
-        skip_unassigned=skip_unassigned,
     )
     start_tickers(
         actors,
