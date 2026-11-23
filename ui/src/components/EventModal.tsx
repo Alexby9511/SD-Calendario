@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, CalendarPlus, MapPin, Plus, User, UserPlus, Users, X } from "lucide-react";
+import type { GroupEvent } from "../types/protocol";
+
+function defaultLocalTime(hourOffset: number) {
+  const date = new Date();
+  date.setMinutes(0, 0, 0);
+  date.setHours(date.getHours() + hourOffset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
 
 interface Props {
   open: boolean;
@@ -7,42 +15,74 @@ interface Props {
   initialStart?: string;
   initialEnd?: string;
   user: string;
-  availability: Record<string, { start: string; end: string }[]>;
+  availability: Record<string, "busy" | "available">;
+  checkAvailability: (users: string[], start: string, end: string) => Promise<Record<string, "busy" | "available">>;
+  editingEvent: GroupEvent | null;
   onClose: () => void;
-  onSavePersonal: (event: { title: string; start: string; end: string; tzid: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean }) => void;
-  onSaveGroup: (event: { title: string; location: string; start: string; end: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number }) => void;
+  onSavePersonal: (event: { title: string; start: string; end: string; tzid: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean }, existing?: GroupEvent) => void;
+  onSaveGroup: (event: { title: string; location: string; start: string; end: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number }, existing?: GroupEvent) => void;
+}
+
+function inputDateTime(value?: string) {
+  if (!value) return "";
+  const date = new Date(value.replace(" ", "T"));
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 export function EventModal(props: Props) {
   const [tab, setTab] = useState<"personal" | "group">("personal");
   const [title, setTitle] = useState("Nueva actividad");
   const [location, setLocation] = useState("");
-  const [start, setStart] = useState("2026-11-23T09:00");
-  const [end, setEnd] = useState("2026-11-23T10:00");
+  const [start, setStart] = useState(() => defaultLocalTime(1));
+  const [end, setEnd] = useState(() => defaultLocalTime(2));
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [availability, setAvailability] = useState<"busy" | "free">("busy");
+  const [hideFromFreebusy, setHideFromFreebusy] = useState(false);
   const [rule, setRule] = useState<"ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER">("ALL");
   const [participants, setParticipants] = useState<string[]>([]);
   const [participantPickerOpen, setParticipantPickerOpen] = useState(false);
-  const availableParticipants = Array.from(new Set(["bob", "carol", ...Object.keys(props.availability)]));
-  const conflicts = participants.some((user) =>
-    (props.availability[user] ?? []).some((window) => start.replace("T", " ") < window.end && window.start < end.replace("T", " "))
-  );
+  const [checkedAvailability, setCheckedAvailability] = useState<Record<string, "busy" | "available">>({});
+  const [availabilityWarning, setAvailabilityWarning] = useState("");
+  const availableParticipants = Array.from(new Set(["alice", "bob", "carol", ...Object.keys(props.availability)]))
+    .filter((user) => user !== props.user);
+
+  useEffect(() => {
+    if (!props.open || !start || !end || new Date(start) >= new Date(end)) return;
+    let active = true;
+    const users = tab === "group" ? Array.from(new Set([props.user, ...participants])) : [props.user];
+    props.checkAvailability(users, new Date(start).toISOString(), new Date(end).toISOString())
+      .then((result) => {
+        if (active) {
+          setCheckedAvailability(result);
+          setAvailabilityWarning("");
+        }
+      })
+      .catch(() => {
+        if (active) setAvailabilityWarning("No se pudo consultar la disponibilidad; se verificará al guardar.");
+      });
+    return () => { active = false; };
+  }, [props.open, props.user, props.checkAvailability, tab, participants, start, end]);
+
+  const conflicts = (tab === "group" ? [props.user, ...participants] : [props.user])
+    .some((candidate) => checkedAvailability[candidate] === "busy");
+  const invalidWindow = !title.trim() || !start || !end || new Date(start) >= new Date(end);
 
   useEffect(() => {
     if (props.open) {
-      setTab(props.initialMode);
-      setTitle("Nueva actividad");
-      setLocation("");
-      setStart(props.initialStart ?? "2026-11-23T09:00");
-      setEnd(props.initialEnd ?? "2026-11-23T10:00");
-      setVisibility("private");
-      setAvailability("busy");
-      setRule("ALL");
-      setParticipants([]);
+      const event = props.editingEvent;
+      setTab(event?.kind ?? props.initialMode);
+      setTitle(event?.payload.title ?? "Nueva actividad");
+      setLocation(event?.payload.location ?? "");
+      setStart(inputDateTime(event?.payload.start) || props.initialStart || defaultLocalTime(1));
+      setEnd(inputDateTime(event?.payload.end) || props.initialEnd || defaultLocalTime(2));
+      setVisibility(event?.payload.visibility ?? "private");
+      setAvailability(event?.payload.availability ?? "busy");
+      setHideFromFreebusy(event?.payload.hide_from_freebusy ?? false);
+      setRule(event?.payload.confirmation_rule ?? "ALL");
+      setParticipants(event?.participants ?? []);
       setParticipantPickerOpen(false);
     }
-  }, [props.open, props.initialMode, props.initialStart, props.initialEnd]);
+  }, [props.open, props.initialMode, props.initialStart, props.initialEnd, props.editingEvent]);
 
   if (!props.open) return null;
 
@@ -50,6 +90,7 @@ export function EventModal(props: Props) {
     setTab(mode);
     setVisibility("private");
     setAvailability("busy");
+    setHideFromFreebusy(false);
     setRule("ALL");
     setParticipants([]);
     setParticipantPickerOpen(false);
@@ -59,25 +100,25 @@ export function EventModal(props: Props) {
     if (tab === "personal") {
       props.onSavePersonal({
         title,
-        start: start.replace("T", " "),
-        end: end.replace("T", " "),
-        tzid: "America/New_York",
+        start: new Date(start).toISOString(),
+        end: new Date(end).toISOString(),
+        tzid: Intl.DateTimeFormat().resolvedOptions().timeZone,
         visibility,
         availability,
         privacy: visibility,
-        hide: availability === "free"
-      });
+        hide: hideFromFreebusy
+      }, props.editingEvent ?? undefined);
     } else {
       if (participants.length === 0) return;
       props.onSaveGroup({
         title,
         location,
-        start: start.replace("T", " "),
-        end: end.replace("T", " "),
+        start: new Date(start).toISOString(),
+        end: new Date(end).toISOString(),
         participants: participants.map((user_id) => ({ user_id, role: "REQUIRED" })),
         rule,
-        quorum: 2
-      });
+        quorum: Math.min(2, participants.length)
+      }, props.editingEvent ?? undefined);
     }
   };
 
@@ -85,7 +126,7 @@ export function EventModal(props: Props) {
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <section className="event-modal">
         <header>
-          <h2><CalendarPlus size={18} /> Crear</h2>
+          <h2><CalendarPlus size={18} /> {props.editingEvent ? "Editar" : "Crear"}</h2>
           <button className="icon-button" onClick={props.onClose}><X size={18} /></button>
         </header>
         <div className="modal-tabs">
@@ -111,6 +152,10 @@ export function EventModal(props: Props) {
                   <option value="free">Disponible</option>
                 </select></label>
               </div>
+              <label className="switch-row">
+                <span><strong>Ocultar en disponibilidad</strong><small>Los demás no verán si estás ocupado</small></span>
+                <input type="checkbox" checked={hideFromFreebusy} onChange={(e) => setHideFromFreebusy(e.target.checked)} />
+              </label>
             </>
           ) : (
             <>
@@ -147,16 +192,17 @@ export function EventModal(props: Props) {
               <label>Confirmación<select value={rule} onChange={(e) => setRule(e.target.value as typeof rule)}>
                 <option value="ALL">Todos deben aceptar</option>
                 <option value="MAJORITY">Mayoría</option>
-                <option value="QUORUM">Quórum — 2</option>
+                <option value="QUORUM">Quórum — hasta 2</option>
                 <option value="ORGANIZER">Organizador</option>
               </select></label>
-              {conflicts && <div className="conflict-warning"><AlertTriangle size={15} /> Posible conflicto con disponibilidad publicada.</div>}
             </>
           )}
+          {conflicts && <div className="conflict-warning"><AlertTriangle size={15} /> Hay un conflicto de disponibilidad para este horario.</div>}
+          {availabilityWarning && <div className="conflict-warning"><AlertTriangle size={15} /> {availabilityWarning}</div>}
         </div>
         <footer>
           <button className="subtle-button" onClick={props.onClose}>Cancelar</button>
-          <button className="primary-button" onClick={submit} disabled={tab === "group" && participants.length === 0}>Guardar</button>
+          <button className="primary-button" onClick={submit} disabled={invalidWindow || (tab === "group" && participants.length === 0)}>Guardar</button>
         </footer>
       </section>
     </div>

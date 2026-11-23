@@ -29,9 +29,13 @@ class CoordinatorState:
         return self.fsm.snapshot()
 
     def availability(
-        self, users: Optional[List[str]] = None, start: Optional[str] = None, end: Optional[str] = None
+        self,
+        users: Optional[List[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        viewer: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return self.fsm.availability(users, start, end)
+        return self.fsm.availability(users, start, end, viewer)
 
     def conflicts(self, user: str, start: str, end: str, exclude_uid: Optional[str] = None) -> Dict[str, Any]:
         return self.fsm.conflicts(user, start, end, exclude_uid)

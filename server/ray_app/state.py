@@ -43,8 +43,9 @@ class CalendarState:
         users: Optional[List[str]] = None,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        viewer: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return self.fsm.availability(users, start, end)
+        return self.fsm.availability(users, start, end, viewer)
 
     def conflicts(
         self,

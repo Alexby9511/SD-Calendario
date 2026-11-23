@@ -155,6 +155,7 @@ class RaftCluster:
         users: Optional[List[str]] = None,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        viewer: Optional[str] = None,
     ) -> Dict[str, Any]:
         snapshot = self.snapshot()
         selected = users if users else sorted(
@@ -178,7 +179,7 @@ class RaftCluster:
         snapshot_ref = ray.put(snapshot)
         pending = [
             calendar_query_task.remote(
-                snapshot_ref, "availability", (batch, start, end)
+                snapshot_ref, "availability", (batch, start, end, viewer)
             )
             for batch in batches
         ]

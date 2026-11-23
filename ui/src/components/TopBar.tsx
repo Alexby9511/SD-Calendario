@@ -3,16 +3,19 @@ import { ChevronDown, ChevronLeft, ChevronRight, Menu, Moon, RefreshCw, Sun } fr
 
 interface Props {
   user: string;
+  token: string;
   group: string;
   keyId: string;
   offline: boolean;
   view: "Día" | "Semana" | "Mes" | "Año" | "Agenda";
   title: string;
+  syncError: string;
   pending: number;
   cursor: number;
   online: boolean;
   theme: "dark" | "light";
   onUser: (value: string) => void;
+  onToken: (value: string) => void;
   onGroup: (value: string) => void;
   onOffline: (value: boolean) => void;
   onView: (value: "Día" | "Semana" | "Mes" | "Año" | "Agenda") => void;
@@ -28,9 +31,12 @@ export function TopBar(props: Props) {
   const [networkOpen, setNetworkOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState(props.token);
   const networkRef = useRef<HTMLDivElement>(null);
   const accountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => setTokenDraft(props.token), [props.user, props.token]);
 
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -74,6 +80,7 @@ export function TopBar(props: Props) {
           </button>
           {networkOpen && <div className="top-popover network-popover">
             <div className="popover-heading"><span>Estado distribuido</span><small>sync #{props.cursor}</small></div>
+            {props.syncError && <p className="sync-error">{props.syncError}</p>}
             <label className="switch-row"><span><strong>Modo offline</strong><small>Acumular en el Outbox</small></span><input type="checkbox" checked={props.offline} onChange={(e) => props.onOffline(e.target.checked)} /></label>
             <button className="popover-action" onClick={props.onSync}><RefreshCw size={15} /> Sincronizar ahora</button>
             <button className="popover-action" onClick={props.onInspector}>Abrir inspector técnico</button>
@@ -92,6 +99,11 @@ export function TopBar(props: Props) {
             <div className="account-users">
               {["alice", "bob", "carol"].map((user) => <button key={user} className={props.user === user ? "selected" : ""} onClick={() => props.onUser(user)}>{user[0].toUpperCase()}</button>)}
             </div>
+            <label className="account-label" htmlFor="api-token">Token Bearer de {props.user}</label>
+            <input id="api-token" className="group-input" type="password" autoComplete="off"
+              placeholder="Pega el token asignado a este usuario" value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)} />
+            <button className="popover-action" onClick={() => props.onToken(tokenDraft)}>Guardar token en este navegador</button>
             <label className="account-label" htmlFor="group-id">Group ID</label>
             <input id="group-id" className="group-input" value={props.group} onChange={(e) => props.onGroup(e.target.value)} />
           </div>}

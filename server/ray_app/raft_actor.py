@@ -45,6 +45,7 @@ class ReplicatedState(Protocol):
         users: Optional[List[str]] = None,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        viewer: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return the busy windows of the requested users."""
 
@@ -123,8 +124,9 @@ class RaftReplica:
         users: Optional[List[str]] = None,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        viewer: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return self.state.availability(users, start, end)
+        return self.state.availability(users, start, end, viewer)
 
     def conflicts(
         self,

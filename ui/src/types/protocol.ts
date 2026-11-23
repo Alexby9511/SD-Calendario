@@ -1,6 +1,6 @@
 export type EnvelopeType =
   | "REQUEST" | "REPLY" | "COUNTER" | "DECLINECOUNTER" | "CANCEL"
-  | "CLOSE_POLL" | "REOPEN" | "REANCHOR" | "BUSY_UPDATE" | "EVALUATE";
+  | "CLOSE_POLL" | "REOPEN" | "REANCHOR" | "BUSY_UPDATE" | "SHARE_CALENDAR" | "EVALUATE";
 
 export type PartStat = "ACCEPTED" | "DECLINED" | "TENTATIVE" | "NEEDS_ACTION" | "STALE_ACCEPTED" | "STALE_DECLINED" | "STALE_TENTATIVE" | "LATE_ACCEPTED" | "LATE_DECLINED" | "LATE_TENTATIVE";
 export type FsmState = "PROPOSED" | "CONFIRMED" | "NOT_CONFIRMED" | "EXPIRED" | "CANCELLED";
@@ -50,6 +50,21 @@ export interface SyncEntry {
   msg_id: string;
   command: Envelope;
   result: Record<string, unknown>;
+  event?: GroupEvent;
+  attendance?: Record<string, string>;
+}
+
+export interface SyncPage {
+  entries: SyncEntry[];
+  next: number;
+  as_of: number;
+  snapshot?: {
+    events: Record<string, GroupEvent>;
+    attendance: Record<string, Record<string, string>>;
+    counters: Record<string, Record<string, { proposed_start?: string; proposed_end?: string }>>;
+    calendar_shares: CalendarShare[];
+    applied_index: number;
+  };
 }
 
 export interface BusyWindow {

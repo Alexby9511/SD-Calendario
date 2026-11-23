@@ -17,7 +17,7 @@ interface Props {
 const permissionDescription: Record<CalendarSharePermission, string> = {
   freebusy: "Solo verá cuándo estás ocupado, sin detalles de los eventos.",
   details: "Podrá ver los títulos y descripciones de tus eventos.",
-  edit: "Podrá crear y editar eventos en tu calendario."
+  edit: "Podrá editar y cancelar eventos existentes."
 };
 
 export function ShareCalendarModal(props: Props) {
@@ -102,7 +102,7 @@ export function ShareCalendarModal(props: Props) {
           </select>
           <p>{permissionDescription[permission]}</p>
           <small className="share-local-note">
-            Estos permisos se guardan en este navegador. El servidor actual no concede acceso remoto a otros usuarios.
+            Los permisos se sincronizan con el servidor y se aplican al calendario de cada usuario.
           </small>
         </div>
         <footer>

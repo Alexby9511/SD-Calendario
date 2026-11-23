@@ -63,6 +63,150 @@ def test_group_replies_confirm_after_all_attendees_accept():
     assert fsm.events[proposal["uid"]]["state"] == "CONFIRMED"
 
 
+def test_majority_confirmation_uses_the_selected_rule():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob", "carol", "dave"],
+        "confirmation_rule": "MAJORITY",
+    }
+    fsm.apply(proposal)
+
+    for sender, msg_id in (
+        ("bob", "01J00000000000000000000031"),
+        ("carol", "01J00000000000000000000032"),
+    ):
+        reply = request(msg_id=msg_id, sender=sender, uid=proposal["uid"])
+        reply["type"] = "REPLY"
+        reply["payload"] = {"partstat": "ACCEPTED"}
+        fsm.apply(reply)
+
+    assert fsm.events[proposal["uid"]]["state"] == "CONFIRMED"
+
+
+def test_personal_privacy_controls_freebusy_without_hiding_organizer_conflicts():
+    fsm = CalendarFSM()
+    event = request()
+    event["payload"] = {
+        "kind": "personal",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "availability": "busy",
+        "hide_from_freebusy": True,
+    }
+    fsm.apply(event)
+
+    result = fsm.availability(
+        ["alice", "bob"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "alice"
+    )
+    assert result["users"] == {"alice": "busy", "bob": "available"}
+    external_result = fsm.availability(
+        ["alice"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "bob"
+    )
+    assert external_result["users"] == {"alice": "available"}
+    assert fsm.conflicts(
+        "alice", "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z"
+    )["conflicts"]
+
+
+def test_organizer_can_close_and_reopen_poll_and_counters_sync():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob"],
+        "confirmation_rule": "ORGANIZER",
+    }
+    fsm.apply(proposal)
+
+    counter = request(
+        msg_id="01J00000000000000000000033",
+        sender="bob",
+        uid=proposal["uid"],
+    )
+    counter["type"] = "COUNTER"
+    counter["payload"] = {
+        "proposed_start": "2026-11-21T12:00:00Z",
+        "proposed_end": "2026-11-21T13:00:00Z",
+    }
+    assert fsm.apply(counter)["code"] == 200
+    assert fsm.sync_for("alice")["snapshot"]["counters"][proposal["uid"]]["bob"] == counter["payload"]
+
+    close = request(msg_id="01J00000000000000000000034", uid=proposal["uid"])
+    close["type"] = "CLOSE_POLL"
+    close["payload"] = {}
+    assert fsm.apply(close)["result"]["state"] == "CONFIRMED"
+
+    reopen = request(msg_id="01J00000000000000000000035", uid=proposal["uid"])
+    reopen["type"] = "REOPEN"
+    reopen["payload"] = {"reask": True}
+    assert fsm.apply(reopen)["result"]["state"] == "PROPOSED"
+    assert fsm.attendance[proposal["uid"]] == {}
+
+
+def test_calendar_share_controls_private_visibility_and_edit_access():
+    fsm = CalendarFSM()
+    share = request()
+    share["type"] = "SHARE_CALENDAR"
+    share["uid"] = "alice:calendar:personal"
+    share["payload"] = {
+        "calendar": "personal",
+        "users": ["bob"],
+        "permission": "details",
+    }
+    assert fsm.apply(share)["code"] == 200
+
+    event = request(msg_id="01J00000000000000000000036")
+    event["payload"] = {
+        "kind": "personal",
+        "title": "Privado",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "visibility": "private",
+    }
+    fsm.apply(event)
+    bob_snapshot = fsm.sync_for("bob")["snapshot"]
+    assert event["uid"] in bob_snapshot["events"]
+    assert bob_snapshot["calendar_shares"][0]["users"] == ["bob"]
+
+    share["msg_id"] = "01J00000000000000000000037"
+    share["payload"] = {
+        "calendar": "personal",
+        "users": ["bob"],
+        "permission": "edit",
+    }
+    fsm.apply(share)
+    update = request(
+        msg_id="01J00000000000000000000038",
+        sender="bob",
+        sequence=2,
+        uid=event["uid"],
+    )
+    update["payload"] = {
+        "kind": "personal",
+        "title": "Actualizado por Bob",
+        "start": "2026-11-21T12:00:00Z",
+        "end": "2026-11-21T13:00:00Z",
+        "visibility": "private",
+    }
+    assert fsm.apply(update)["code"] == 200
+    assert fsm.events[event["uid"]]["payload"]["title"] == "Actualizado por Bob"
+
+    cancel = request(
+        msg_id="01J00000000000000000000039",
+        sender="bob",
+        uid=event["uid"],
+    )
+    cancel["type"] = "CANCEL"
+    assert fsm.apply(cancel)["code"] == 200
+    assert fsm.events[event["uid"]]["state"] == "CANCELLED"
+
+
 def test_conflicting_personal_event_is_rejected():
     fsm = CalendarFSM()
     first = request()
@@ -181,10 +325,10 @@ def test_cancelled_event_does_not_block_a_new_event():
     assert fsm.apply(second)["code"] == 200
 
 
-def test_unimplemented_commands_are_not_reported_as_success():
+def test_unsupported_commands_are_not_reported_as_success():
     fsm = CalendarFSM()
     command = request()
-    command["type"] = "REOPEN"
+    command["type"] = "DECLINECOUNTER"
 
     result = fsm.apply(command)
 

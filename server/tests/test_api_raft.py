@@ -55,7 +55,7 @@ class FakeCluster:
             "applied_index": 1,
         }
 
-    def availability(self, users=None, start=None, end=None):
+    def availability(self, users=None, start=None, end=None, viewer=None):
         selected = users or ["alice"]
         return {
             "users": {

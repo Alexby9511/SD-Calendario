@@ -76,19 +76,31 @@ def authenticated_user(authorization: Optional[str] = Header(default=None)) -> s
         raise HTTPException(status_code=401, detail={"reason": "invalid_bearer_token"}) from exc
 
 
-def _can_view_event(event: Dict[str, Any], user_id: str) -> bool:
-    return event.get("visibility", "private") == "public" or (
+def _can_view_event(
+    event: Dict[str, Any], user_id: str, calendar_shares: Dict[str, Any]
+) -> bool:
+    if event.get("visibility", "private") == "public" or (
         event.get("organizer") == user_id
         or user_id in event.get("participants", [])
+    ):
+        return True
+    share = calendar_shares.get(event.get("organizer"), {}).get(
+        event.get("kind", "")
+    )
+    return bool(
+        share
+        and user_id in share.get("users", [])
+        and share.get("permission") in ("details", "edit")
     )
 
 
 def _visible_snapshot(snapshot: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    calendar_shares = snapshot.get("calendar_shares", {})
     return {
         "events": {
             uid: event
             for uid, event in snapshot.get("events", {}).items()
-            if _can_view_event(event, user_id)
+            if _can_view_event(event, user_id, calendar_shares)
         },
         "applied_index": snapshot.get("applied_index", 0),
     }
@@ -197,13 +209,15 @@ if app is not None:
         cluster = get_cluster()
         if cluster is not None:
             try:
-                return cluster.availability(selected, start, end)
+                return cluster.availability(selected, start, end, user_id)
             except ValueError as exc:
                 raise HTTPException(
                     status_code=422, detail={"reason": str(exc)}
                 ) from exc
         try:
-            return resolve(call_coordinator("availability", selected, start, end))
+            return resolve(
+                call_coordinator("availability", selected, start, end, user_id)
+            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=422, detail={"reason": str(exc)}

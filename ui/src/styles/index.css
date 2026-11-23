@@ -139,6 +139,9 @@ button { cursor: pointer; }
 .calendar-layers h3 { margin: 0 0 7px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 .calendar-layers label { min-height: 31px; display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .calendar-layers input { accent-color: var(--accent); }
+.availability-state { margin-left: auto; font-size: 10px; text-transform: capitalize; color: var(--muted); }
+.availability-state.busy { color: #e58b8b; }
+.availability-state.available { color: #77c99a; }
 .invitations { border-top: 1px solid var(--line-soft); padding: 10px 4px 0; }
 .invitations h3 { display: flex; align-items: center; gap: 7px; margin: 0 0 6px; color: var(--muted); font-size: 10px; text-transform: uppercase; }.invitations h3 b { margin-left: auto; color: var(--accent); }
 .invitations button { width: 100%; height: 42px; border: 0; border-radius: 8px; background: transparent; display: flex; align-items: center; gap: 8px; color: var(--text); text-align: left; }

@@ -20,7 +20,7 @@ export function DistributedInspector(props: Props) {
           <h4>Outbox <small>{props.outbox.length}</small></h4>
           {props.outbox.length === 0 && <p className="empty">Sin mensajes pendientes</p>}
           {props.outbox.map((item) => (
-            <div className="drawer-row" key={item.envelope.msg_id}>
+            <div className="drawer-row" key={item.envelope.msg_id} title={item.error ?? ""}>
               <span className={`state-dot ${item.state.replace(" ", "-").toLowerCase()}`} />
               <b>{item.envelope.type}</b><code>{item.envelope.msg_id.slice(0, 10)}</code><em>{item.state}</em>
             </div>

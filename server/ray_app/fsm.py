@@ -12,6 +12,7 @@ class CalendarFSM:
         self.events: Dict[str, Dict[str, Any]] = {}
         self.attendance: Dict[str, Dict[str, str]] = {}
         self.counters: Dict[str, Dict[str, Any]] = {}
+        self.calendar_shares: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.busy: Dict[str, Dict[str, Any]] = {}
         self.seen: Dict[str, Dict[str, Any]] = {}
         self.log: List[Dict[str, Any]] = []
@@ -41,8 +42,14 @@ class CalendarFSM:
             result = {"code": 422, "reason": "unsupported_command"}
         elif envelope.type == "CANCEL":
             result = self._cancel(envelope)
+        elif envelope.type == "CLOSE_POLL":
+            result = self._close_poll(envelope)
+        elif envelope.type == "REOPEN":
+            result = self._reopen(envelope)
         elif envelope.type == "BUSY_UPDATE":
             result = self._busy_update(envelope)
+        elif envelope.type == "SHARE_CALENDAR":
+            result = self._share_calendar(envelope)
         elif envelope.type == "EVALUATE":
             result = {"ok": True, "type": "EVALUATE"}
         else:
@@ -116,10 +123,10 @@ class CalendarFSM:
             self.attendance.setdefault(uid, {})
             return {"ok": True, "uid": uid, "state": self.events[uid]["state"]}
 
+        if not self._can_edit_event(existing, envelope.sender_id):
+            return {"code": 403, "reason": "organizer_only"}
         if envelope.sequence <= existing["sequence"]:
             return {"ok": True, "uid": uid, "state": existing["state"], "stale": True}
-        if existing["organizer"] != envelope.sender_id:
-            return {"code": 403, "reason": "organizer_only"}
         if existing["state"] in ("EXPIRED", "CANCELLED"):
             code = 410 if existing["state"] == "CANCELLED" else 409
             return {"code": code, "reason": "terminal_event"}
@@ -166,13 +173,10 @@ class CalendarFSM:
             return {"code": 409, "reason": "attendee_schedule_conflict"}
 
         self.attendance.setdefault(envelope.uid, {})[envelope.sender_id] = response
-        if response == "DECLINED":
-            event["state"] = "NOT_CONFIRMED"
-        elif event["participants"] and all(
-            self.attendance[envelope.uid].get(user) == "ACCEPTED"
-            for user in event["participants"]
-        ):
+        if self._confirmation_reached(event):
             event["state"] = "CONFIRMED"
+        elif not self._confirmation_is_possible(event):
+            event["state"] = "NOT_CONFIRMED"
         return {"ok": True, "uid": envelope.uid, "partstat": response}
 
     def _counter(self, envelope: Envelope) -> Dict[str, Any]:
@@ -185,16 +189,91 @@ class CalendarFSM:
             return {"code": 409, "reason": "poll_closed"}
         if envelope.sender_id not in event["participants"]:
             return {"code": 403, "reason": "not_an_attendee"}
+        start = envelope.payload.get("proposed_start")
+        end = envelope.payload.get("proposed_end")
+        if not self._valid_window(start, end):
+            return {"code": 422, "reason": "invalid_counter_window"}
+        if self._has_conflict(envelope.sender_id, {"start": start, "end": end}, exclude_uid=envelope.uid):
+            return {"code": 409, "reason": "attendee_schedule_conflict"}
         self.counters.setdefault(envelope.uid, {})[envelope.sender_id] = copy.deepcopy(
             envelope.payload
         )
         return {"ok": True, "uid": envelope.uid, "counter": envelope.payload}
 
-    def _cancel(self, envelope: Envelope) -> Dict[str, Any]:
+    def _close_poll(self, envelope: Envelope) -> Dict[str, Any]:
         event = self.events.get(envelope.uid)
         if event is None:
             return {"code": 409, "reason": "unknown_event"}
         if event["organizer"] != envelope.sender_id:
+            return {"code": 403, "reason": "organizer_only"}
+        if event["state"] != "PROPOSED":
+            return {"code": 409, "reason": "poll_closed"}
+        if (
+            str(event["payload"].get("confirmation_rule", "ALL")).upper() == "ORGANIZER"
+            or self._confirmation_reached(event)
+        ):
+            event["state"] = "CONFIRMED"
+        else:
+            event["state"] = "NOT_CONFIRMED"
+        return {"ok": True, "uid": envelope.uid, "state": event["state"]}
+
+    def _reopen(self, envelope: Envelope) -> Dict[str, Any]:
+        event = self.events.get(envelope.uid)
+        if event is None:
+            return {"code": 409, "reason": "unknown_event"}
+        if event["organizer"] != envelope.sender_id:
+            return {"code": 403, "reason": "organizer_only"}
+        if event["state"] in ("CANCELLED", "EXPIRED"):
+            return {"code": 410, "reason": "terminal_event"}
+        if event["state"] == "PROPOSED":
+            return {"code": 409, "reason": "poll_already_open"}
+        event["state"] = "PROPOSED"
+        if envelope.payload.get("reask", True):
+            self.attendance[envelope.uid] = {}
+        return {"ok": True, "uid": envelope.uid, "state": "PROPOSED"}
+
+    def _confirmation_reached(self, event: Dict[str, Any]) -> bool:
+        participants = event["participants"]
+        rule = str(event["payload"].get("confirmation_rule", "ALL")).upper()
+        if rule == "ORGANIZER":
+            return False
+        if rule == "MAJORITY":
+            required = len(participants) // 2 + 1
+        elif rule == "QUORUM":
+            required = event["payload"].get("quorum", len(participants))
+            if not isinstance(required, int) or isinstance(required, bool) or required < 1:
+                required = len(participants)
+        else:
+            required = len(participants)
+        accepted = sum(
+            self.attendance.get(event["uid"], {}).get(user) == "ACCEPTED"
+            for user in participants
+        )
+        return bool(participants) and accepted >= required
+
+    def _confirmation_is_possible(self, event: Dict[str, Any]) -> bool:
+        participants = event["participants"]
+        rule = str(event["payload"].get("confirmation_rule", "ALL")).upper()
+        if rule == "ORGANIZER":
+            return True
+        if rule == "MAJORITY":
+            required = len(participants) // 2 + 1
+        elif rule == "QUORUM":
+            required = event["payload"].get("quorum", len(participants))
+            if not isinstance(required, int) or isinstance(required, bool) or required < 1:
+                required = len(participants)
+        else:
+            required = len(participants)
+        attendance = self.attendance.get(event["uid"], {})
+        accepted = sum(attendance.get(user) == "ACCEPTED" for user in participants)
+        unanswered = sum(user not in attendance for user in participants)
+        return accepted + unanswered >= required
+
+    def _cancel(self, envelope: Envelope) -> Dict[str, Any]:
+        event = self.events.get(envelope.uid)
+        if event is None:
+            return {"code": 409, "reason": "unknown_event"}
+        if not self._can_edit_event(event, envelope.sender_id):
             return {"code": 403, "reason": "organizer_only"}
         if event["state"] == "CANCELLED":
             return {"ok": True, "uid": envelope.uid, "state": "CANCELLED", "idempotent": True}
@@ -225,8 +304,45 @@ class CalendarFSM:
         self.busy[key] = {"pub_seq": pub_seq, "windows": copy.deepcopy(windows)}
         return {"ok": True, "pub_seq": pub_seq}
 
+    def _share_calendar(self, envelope: Envelope) -> Dict[str, Any]:
+        calendar = envelope.payload.get("calendar")
+        users = envelope.payload.get("users")
+        permission = envelope.payload.get("permission")
+        if not isinstance(calendar, str) or not calendar.strip():
+            return {"code": 422, "reason": "invalid_calendar"}
+        if not isinstance(users, list) or any(
+            not isinstance(user, str) or not user.strip() for user in users
+        ):
+            return {"code": 422, "reason": "invalid_share_users"}
+        if permission not in ("freebusy", "details", "edit"):
+            return {"code": 422, "reason": "invalid_share_permission"}
+        recipients = list(dict.fromkeys(users))
+        if envelope.sender_id in recipients:
+            return {"code": 422, "reason": "cannot_share_with_self"}
+        owner_shares = self.calendar_shares.setdefault(envelope.sender_id, {})
+        if not recipients:
+            owner_shares.pop(calendar, None)
+            if not owner_shares:
+                self.calendar_shares.pop(envelope.sender_id, None)
+        else:
+            owner_shares[calendar] = {
+                "users": recipients,
+                "permission": permission,
+            }
+        return {
+            "ok": True,
+            "owner": envelope.sender_id,
+            "calendar": calendar,
+            "users": recipients,
+            "permission": permission,
+        }
+
     def availability(
-        self, users: Optional[List[str]] = None, start: Optional[str] = None, end: Optional[str] = None
+        self,
+        users: Optional[List[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        viewer: Optional[str] = None,
     ) -> Dict[str, Any]:
         if (start is None) != (end is None):
             raise ValueError("availability_requires_start_and_end")
@@ -243,7 +359,7 @@ class CalendarFSM:
         result: Dict[str, str] = {}
         for user in selected:
             result[user] = (
-                "busy" if self._is_busy(user, start, end) else "available"
+                "busy" if self._is_busy(user, start, end, viewer) else "available"
             )
         return {"users": result, "as_of": self.applied_index}
 
@@ -308,6 +424,7 @@ class CalendarFSM:
                     **item,
                     "event": copy.deepcopy(self.events[uid]),
                     "attendance": copy.deepcopy(self.attendance.get(uid, {})),
+                    "counters": copy.deepcopy(self.counters.get(uid, {})),
                 }
             )
         page["entries"] = visible_entries
@@ -322,6 +439,11 @@ class CalendarFSM:
             },
             "attendance": {
                 uid: copy.deepcopy(self.attendance.get(uid, {}))
+                for uid in visible_uids
+            },
+            "calendar_shares": self._shares_for(user_id),
+            "counters": {
+                uid: copy.deepcopy(self.counters.get(uid, {}))
                 for uid in visible_uids
             },
             "applied_index": self.applied_index,
@@ -350,14 +472,18 @@ class CalendarFSM:
         return bool(self.conflicts(user, start, end, exclude_uid)["conflicts"])
 
     def _is_busy(
-        self, user: str, start: Optional[str], end: Optional[str]
+        self,
+        user: str,
+        start: Optional[str],
+        end: Optional[str],
+        viewer: Optional[str] = None,
     ) -> bool:
         if start is None and end is None:
             return any(
                 window.get("availability") == "busy"
                 for window in self.busy.get(user, {}).get("windows", [])
             ) or any(
-                self._event_is_busy_for(event, user)
+                self._event_is_busy_for(event, user, viewer)
                 and self._valid_window(
                     event["payload"].get("start"), event["payload"].get("end")
                 )
@@ -365,7 +491,7 @@ class CalendarFSM:
             )
         for event in self.events.values():
             if (
-                not self._event_is_busy_for(event, user)
+                not self._event_is_busy_for(event, user, viewer)
             ):
                 continue
             payload = event["payload"]
@@ -413,6 +539,19 @@ class CalendarFSM:
         payload["kind"] = kind
         payload["participants"] = participants
         payload["visibility"] = visibility
+        confirmation_rule = str(payload.get("confirmation_rule", "ALL")).upper()
+        if confirmation_rule not in ("ALL", "MAJORITY", "QUORUM", "ORGANIZER"):
+            raise ValueError("invalid_confirmation_rule")
+        payload["confirmation_rule"] = confirmation_rule
+        if confirmation_rule == "QUORUM":
+            quorum = payload.get("quorum")
+            if (
+                not isinstance(quorum, int)
+                or isinstance(quorum, bool)
+                or quorum < 1
+                or quorum > len(participants)
+            ):
+                raise ValueError("invalid_quorum")
         return payload
 
     @staticmethod
@@ -453,9 +592,24 @@ class CalendarFSM:
     def _event_involves(event: Dict[str, Any], user: str) -> bool:
         return event["organizer"] == user or user in event.get("participants", [])
 
-    def _event_is_busy_for(self, event: Dict[str, Any], user: str) -> bool:
+    def _event_is_busy_for(
+        self, event: Dict[str, Any], user: str, viewer: Optional[str] = None
+    ) -> bool:
         if event["state"] in ("CANCELLED", "EXPIRED", "NOT_CONFIRMED"):
             return False
+        if event["kind"] == "personal":
+            if event["payload"].get("availability", "busy") != "busy":
+                return False
+            if (
+                event["payload"].get("hide_from_freebusy", False)
+                and viewer is not None
+                and viewer != event["organizer"]
+            ):
+                return False
+            return (
+                user == event["organizer"]
+                or not event["payload"].get("hide_from_freebusy", False)
+            )
         if user == event["organizer"]:
             return True
         if user not in event.get("participants", []):
@@ -473,17 +627,53 @@ class CalendarFSM:
             return False
         return self._can_view_event(event, user_id)
 
-    @classmethod
-    def _can_view_event(cls, event: Dict[str, Any], user_id: str) -> bool:
-        return event.get("visibility", "private") == "public" or cls._event_involves(
+    def _can_view_event(self, event: Dict[str, Any], user_id: str) -> bool:
+        if event.get("visibility", "private") == "public" or self._event_involves(
             event, user_id
+        ):
+            return True
+        share = self.calendar_shares.get(event["organizer"], {}).get(
+            event.get("kind", "")
         )
+        return bool(
+            share
+            and user_id in share.get("users", [])
+            and share.get("permission") in ("details", "edit")
+        )
+
+    def _can_edit_event(self, event: Dict[str, Any], user_id: str) -> bool:
+        if event["organizer"] == user_id:
+            return True
+        share = self.calendar_shares.get(event["organizer"], {}).get(
+            event.get("kind", "")
+        )
+        return bool(
+            share
+            and user_id in share.get("users", [])
+            and share.get("permission") == "edit"
+        )
+
+    def _shares_for(self, user_id: str) -> List[Dict[str, Any]]:
+        return [
+            {
+                "owner": owner,
+                "calendar": calendar,
+                "users": copy.deepcopy(
+                    share["users"] if owner == user_id else [user_id]
+                ),
+                "permission": share["permission"],
+            }
+            for owner, calendars in self.calendar_shares.items()
+            for calendar, share in calendars.items()
+            if owner == user_id or user_id in share["users"]
+        ]
 
     def snapshot(self) -> Dict[str, Any]:
         return {
             "events": copy.deepcopy(self.events),
             "attendance": copy.deepcopy(self.attendance),
             "counters": copy.deepcopy(self.counters),
+            "calendar_shares": copy.deepcopy(self.calendar_shares),
             "busy": copy.deepcopy(self.busy),
             "seen": copy.deepcopy(self.seen),
             "log": copy.deepcopy(self.log),
@@ -496,6 +686,7 @@ class CalendarFSM:
         fsm.events = copy.deepcopy(snapshot.get("events", {}))
         fsm.attendance = copy.deepcopy(snapshot.get("attendance", {}))
         fsm.counters = copy.deepcopy(snapshot.get("counters", {}))
+        fsm.calendar_shares = copy.deepcopy(snapshot.get("calendar_shares", {}))
         fsm.busy = copy.deepcopy(snapshot.get("busy", {}))
         fsm.seen = copy.deepcopy(snapshot.get("seen", {}))
         fsm.log = copy.deepcopy(snapshot.get("log", []))

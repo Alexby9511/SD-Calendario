@@ -11,7 +11,12 @@ interface Props {
   date: Date;
   events: GroupEvent[];
   busyUsers: string[];
+  availability: Record<string, "busy" | "available">;
+  personalVisible: boolean;
+  groupVisible: boolean;
   onBusyUsers: (users: string[]) => void;
+  onPersonalVisible: (visible: boolean) => void;
+  onGroupVisible: (visible: boolean) => void;
   onCreate: (mode: "personal" | "group") => void;
   onSelectEvent: (event: GroupEvent) => void;
   showCancelled: boolean;
@@ -30,8 +35,7 @@ interface Props {
 
 export function Sidebar(props: Props) {
   const [createMenu, setCreateMenu] = useState(false);
-  const [personalVisible, setPersonalVisible] = useState(true);
-  const [groupVisible, setGroupVisible] = useState(true);
+  const [userSearch, setUserSearch] = useState("");
   const [shareCalendar, setShareCalendar] = useState<SharedCalendarId | null>(null);
   const [createCalendarOpen, setCreateCalendarOpen] = useState(false);
   const [deleteCalendar, setDeleteCalendar] = useState<CustomCalendar | null>(null);
@@ -40,7 +44,9 @@ export function Sidebar(props: Props) {
   const first = new Date(year, month, 1).getDay();
   const days = new Date(year, month + 1, 0).getDate();
   const cells = Array.from({ length: 42 }, (_, i) => i - first + 2);
-  const invitations = props.events.filter((event) => event.state === "PROPOSED");
+  const invitations = props.events.filter((event) =>
+    event.state === "PROPOSED" && event.participants.includes(props.currentUser)
+  );
   const today = new Date();
   const active = props.date;
   const mondayIndex = (new Date(year, month, 1).getDay() + 6) % 7;
@@ -116,7 +122,7 @@ export function Sidebar(props: Props) {
       </section>
 
       <section className="availability-search">
-        <div className="search-pill"><Search size={14} /><input placeholder="Buscar a gente" /></div>
+        <div className="search-pill"><Search size={14} /><input value={userSearch} onChange={(event) => setUserSearch(event.target.value)} placeholder="Buscar a gente" /></div>
       </section>
 
       <section className="calendar-layers">
@@ -133,7 +139,7 @@ export function Sidebar(props: Props) {
           </button>
         </div>
         <div className="calendar-layer-row">
-          <label><input type="checkbox" checked={personalVisible} onChange={(e) => setPersonalVisible(e.target.checked)} /> Mi calendario personal</label>
+          <label><input type="checkbox" checked={props.personalVisible} onChange={(e) => props.onPersonalVisible(e.target.checked)} /> Mi calendario personal</label>
           <button
             type="button"
             className={`share-calendar-button ${existingShare && shareCalendar === "personal" ? "has-shares" : ""}`}
@@ -143,7 +149,7 @@ export function Sidebar(props: Props) {
           ><Share2 size={15} /></button>
         </div>
         <div className="calendar-layer-row">
-          <label><input type="checkbox" checked={groupVisible} onChange={(e) => setGroupVisible(e.target.checked)} /> Reuniones de grupo</label>
+          <label><input type="checkbox" checked={props.groupVisible} onChange={(e) => props.onGroupVisible(e.target.checked)} /> Reuniones de grupo</label>
           <button
             type="button"
             className={`share-calendar-button ${props.shares.some((share) => share.owner === props.currentUser && share.calendar === "group") ? "has-shares" : ""}`}
@@ -171,15 +177,6 @@ export function Sidebar(props: Props) {
             <div className="custom-calendar-actions">
               <button
                 type="button"
-                className={`share-calendar-button ${props.shares.some((share) => share.owner === props.currentUser && share.calendar === calendar.id) ? "has-shares" : ""}`}
-                aria-label={`Compartir ${calendar.name}`}
-                title={`Compartir ${calendar.name}`}
-                onClick={() => setShareCalendar(calendar.id)}
-              >
-                <Share2 size={15} />
-              </button>
-              <button
-                type="button"
                 className="delete-calendar-button"
                 aria-label={`Eliminar ${calendar.name}`}
                 title={`Eliminar ${calendar.name}`}
@@ -195,10 +192,15 @@ export function Sidebar(props: Props) {
 
       <section className="calendar-layers">
         <h3>Disponibilidad</h3>
-        {["bob", "carol"].map((user) => (
+        {Array.from(new Set(["bob", "carol", ...props.shareUsers]))
+          .filter((user) => user.toLocaleLowerCase().includes(userSearch.trim().toLocaleLowerCase()))
+          .map((user) => (
           <label key={user}>
             <input type="checkbox" checked={props.busyUsers.includes(user)} onChange={() => toggleUser(user)} />
             <span className={`avatar ${user}`}>{user[0].toUpperCase()} </span>{user}
+            <small className={`availability-state ${props.availability[user] ?? "unknown"}`}>
+              {props.availability[user] ?? "sin datos"}
+            </small>
           </label>
         ))}
       </section>

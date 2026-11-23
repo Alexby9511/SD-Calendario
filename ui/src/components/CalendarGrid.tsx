@@ -10,7 +10,8 @@ interface Props {
   events: GroupEvent[];
   personalEvents: GroupEvent[];
   busyUsers: string[];
-  availability: Record<string, { start: string; end: string }[]>;
+  personalVisible: boolean;
+  groupVisible: boolean;
   showCancelled: boolean;
   onSelect: (event: GroupEvent) => void;
   onQuickCreate?: (date: Date, start: string, end: string) => void;
@@ -90,7 +91,10 @@ export function CalendarGrid(props: Props) {
     observer.observe(grid);
     return () => observer.disconnect();
   }, [props.view]);
-  const visibleEvents = props.events.filter((event) => props.showCancelled || event.state !== "CANCELLED");
+  const visibleEvents = props.events.filter((event) =>
+    (event.kind === "personal" ? props.personalVisible : props.groupVisible)
+    && (props.showCancelled || event.state !== "CANCELLED")
+  );
   const days = (props.view === "Día" ? [0] : [0, 1, 2, 3, 4, 5, 6]).map((i) => {
     const date = new Date(props.date);
     if (props.view === "Día") {
@@ -331,11 +335,7 @@ export function CalendarGrid(props: Props) {
       {hours.map((hour) => (
         <div className="hour-row" key={hour}>
           <time>{formatHour(hour)}</time>
-          {days.map((day, dayIndex) => <div className="hour-cell" key={dayIndex} onMouseDown={(event) => beginSelection(event, day, dayIndex, hour)}>
-            {props.busyUsers.map((user) => props.availability[user]?.map((window, i) =>
-              window.start && window.end ? <span key={`${user}-${i}`} className={`busy-block busy-${user}`} /> : null
-            ))}
-          </div>)}
+          {days.map((day, dayIndex) => <div className="hour-cell" key={dayIndex} onMouseDown={(event) => beginSelection(event, day, dayIndex, hour)} />)}
         </div>
       ))}
       {visibleEvents.map((event, i) => {

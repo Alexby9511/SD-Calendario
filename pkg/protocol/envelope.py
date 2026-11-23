@@ -10,7 +10,7 @@ from .canonical import canonical_bytes
 
 VALID_TYPES = {
     "REQUEST", "REPLY", "COUNTER", "DECLINECOUNTER", "CANCEL",
-    "CLOSE_POLL", "REOPEN", "REANCHOR", "BUSY_UPDATE", "EVALUATE",
+    "CLOSE_POLL", "REOPEN", "REANCHOR", "BUSY_UPDATE", "SHARE_CALENDAR", "EVALUATE",
 }
 
 

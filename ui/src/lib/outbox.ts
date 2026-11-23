@@ -1,6 +1,6 @@
 import type { Envelope, SyncEntry } from "../types/protocol";
 
-export type OutboxStatus = "PENDING" | "SENT" | "409 Conflict" | "503 Retry";
+export type OutboxStatus = "PENDING" | "SENT" | "409 Conflict" | "503 Retry" | "Rejected";
 
 export interface OutboxItem {
   envelope: Envelope;
@@ -43,12 +43,13 @@ export function getCursor(): number {
   return Number(localStorage.getItem(CURSOR_KEY) ?? "0");
 }
 
-export function reconcile(entries: SyncEntry[]): number {
+export function reconcile(entries: SyncEntry[], next: number): number {
   let cursor = getCursor();
-  for (const entry of entries) {
-    if (entry.index !== cursor + 1) throw new Error("Sync entries are not contiguous");
-    cursor = entry.index;
+  if (!Number.isInteger(next) || next < cursor) throw new Error("Invalid sync cursor");
+  if (entries.some((entry) => entry.index <= cursor || entry.index > next)) {
+    throw new Error("Sync entry is outside the reconciled cursor range");
   }
+  cursor = next;
   localStorage.setItem(CURSOR_KEY, String(cursor));
   return cursor;
 }
