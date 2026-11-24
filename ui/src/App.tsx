@@ -12,6 +12,7 @@ import { ensureDeviceKeys, keyIdFor, signEnvelope } from "./lib/crypto";
 import { getCursor, getOutbox, advanceCursor, enqueue, updateOutbox } from "./lib/outbox";
 import { applyCommand, availability, getStatus, sync as syncServer, validateSession } from "./lib/api";
 import { isEventCalendarVisible, isEventVisibleToUser } from "./lib/calendars";
+import { getSharedCalendarColors } from "./lib/sharedCalendarColors";
 import { loadCustomCalendars, saveCustomCalendars } from "./lib/customCalendars";
 import type { AuthSession } from "./lib/api";
 import type { Envelope, EnvelopeType, GroupEvent, SyncEntry } from "./types/protocol";
@@ -137,29 +138,65 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
   const [counters, setCounters] = useState<Record<string, Record<string, { proposed_start?: string; proposed_end?: string }>>>({});
   const syncRunning = useRef(false);
 
+  const friendUsers = useMemo(
+    () => Array.from(new Set(calendarShares
+      .filter((share) => share.owner !== user && share.users.includes(user))
+      .map((share) => share.owner))),
+    [calendarShares, user]
+  );
+  const selectedFriendUsers = useMemo(
+    () => busyUsers.filter((candidate) => friendUsers.includes(candidate)),
+    [busyUsers, friendUsers]
+  );
   const personalEvents = useMemo(() => events.filter((event) => event.kind === "personal"), [events]);
+  const accessibleEvents = useMemo(
+    () => events.filter((event) => isEventVisibleToUser(event, user, selectedFriendUsers, attendance)),
+    [events, user, selectedFriendUsers, attendance]
+  );
   const visibleEvents = useMemo(
-    () => events.filter((event) =>
-      isEventVisibleToUser(event, user, busyUsers)
-      && isEventCalendarVisible(event, customCalendars, personalVisible, groupVisible)
+    () => accessibleEvents.filter((event) =>
+      isEventCalendarVisible(event, customCalendars, personalVisible, groupVisible, user)
     ),
-    [events, customCalendars, personalVisible, groupVisible, user, busyUsers]
+    [accessibleEvents, customCalendars, personalVisible, groupVisible, user]
+  );
+  const pendingInvitationUids = useMemo(
+    () => new Set(accessibleEvents
+      .filter((event) => {
+        const response = attendance[event.uid]?.[user];
+        return event.kind === "group"
+          && event.organizer !== user
+          && event.participants.includes(user)
+          && event.state !== "CANCELLED"
+          && event.state !== "EXPIRED"
+          && (!response || response === "NEEDS_ACTION");
+      })
+      .map((event) => event.uid)),
+    [accessibleEvents, attendance, user]
   );
   const currentDetailEvent = detailEvent
     ? events.find((event) => event.uid === detailEvent.uid) ?? detailEvent
     : null;
   const shareUsers = useMemo(
     () => Array.from(new Set([
+      ...friendUsers,
       ...Object.keys(availabilityMap),
       ...events.flatMap((event) => [event.organizer, ...event.participants])
     ])).filter((candidate) => candidate !== user),
-    [availabilityMap, events, user]
+    [availabilityMap, events, friendUsers, user]
+  );
+  const sharedCalendarColors = useMemo(
+    () => getSharedCalendarColors(shareUsers, user),
+    [shareUsers, user]
   );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("sd-calendar-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    setBusyUsers((current) => current.filter((candidate) => friendUsers.includes(candidate)));
+  }, [friendUsers]);
 
   useEffect(() => {
     if (loadedEventsUser.current === user) {
@@ -213,7 +250,7 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
           if (active && activeUser.current === user) setAvailabilityMap({});
           return;
         }
-        if (busyUsers.length === 0) {
+        if (selectedFriendUsers.length === 0) {
           if (active && activeUser.current === user) setAvailabilityMap({});
           return;
         }
@@ -221,7 +258,7 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
         const end = new Date(start);
         end.setDate(end.getDate() + 1);
         const result = await availability(
-          busyUsers,
+          selectedFriendUsers,
           token,
           start.toISOString(),
           end.toISOString()
@@ -233,7 +270,7 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
     };
     loadAvailability();
     return () => { active = false; };
-  }, [offline, busyUsers, token, date, statusIndex, user]);
+  }, [offline, selectedFriendUsers, token, date, statusIndex, user]);
 
   const checkAvailability = useCallback(async (users: string[], start: string, end: string) => {
     if (!token) throw new Error("Configura el token Bearer de este usuario");
@@ -294,9 +331,14 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
 
   const deleteCustomCalendar = (id: string) => {
     setCustomCalendars((current) => current.filter((calendar) => calendar.id !== id));
-    setCalendarShares((current) =>
-      current.filter((share) => share.owner !== user || share.calendar !== id)
+    const calendarShare = calendarShares.find(
+      (share) => share.owner === user && share.calendar === id
     );
+    if (calendarShare) {
+      void saveCalendarShare(id, [], calendarShare.permission).catch((error: unknown) => {
+        setSyncError(error instanceof Error ? error.message : String(error));
+      });
+    }
   };
 
   const buildEnvelope = (type: EnvelopeType, uid: string, sequence: number, payload: Record<string, unknown>): Promise<Envelope> =>
@@ -478,22 +520,28 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
   };
 
   const savePersonal = async (
-    value: { title: string; start: string; end: string; tzid: string; calendar_id?: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean },
+    value: { title: string; description: string; start: string; end: string; tzid: string; calendar_id?: string; visibility?: "private" | "public"; availability?: "busy" | "free"; privacy?: "private" | "public"; hide?: boolean },
     existing?: GroupEvent
   ) => {
     const uid = existing?.uid ?? `${user}:personal:${ulid()}`;
     const sequence = existing ? existing.sequence + 1 : 1;
+    const ownerSettings = value.visibility === undefined
+      ? {}
+      : {
+          visibility: value.visibility,
+          privacy: value.privacy ?? value.visibility,
+          availability: value.availability ?? "busy",
+          ...(value.hide !== undefined ? { hide_from_freebusy: value.hide } : {})
+        };
     const envelope = await buildEnvelope("REQUEST", uid, sequence, {
       kind: "personal",
       title: value.title,
+      description: value.description,
       start: value.start,
       end: value.end,
       tzid: value.tzid,
       ...(value.calendar_id ? { calendar_id: value.calendar_id } : {}),
-      privacy: value.privacy,
-      visibility: value.visibility,
-      availability: value.availability,
-      hide_from_freebusy: value.hide
+      ...ownerSettings
     });
     const event: GroupEvent = {
       uid,
@@ -504,13 +552,11 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
       participants: [],
       payload: {
         title: value.title,
+        description: value.description,
         start: value.start,
         end: value.end,
         ...(value.calendar_id ? { calendar_id: value.calendar_id } : {}),
-        privacy: value.privacy,
-        visibility: value.visibility,
-        availability: value.availability,
-        hide_from_freebusy: value.hide
+        ...ownerSettings
       }
     };
     setEvents((current) => existing
@@ -529,7 +575,7 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
   };
 
   const saveGroup = async (
-    value: { title: string; location: string; start: string; end: string; calendar_id?: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number },
+    value: { title: string; description: string; location: string; start: string; end: string; calendar_id?: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number },
     existing?: GroupEvent
   ) => {
     const uid = existing?.uid ?? `${user}:meeting:${ulid()}`;
@@ -537,6 +583,7 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
     const envelope = await buildEnvelope("REQUEST", uid, sequence, {
       kind: "group",
       title: value.title,
+      description: value.description,
       location: value.location,
       start: value.start,
       end: value.end,
@@ -555,6 +602,7 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
       participants: value.participants.map((participant) => participant.user_id),
       payload: {
         title: value.title,
+        description: value.description,
         location: value.location,
         start: value.start,
         end: value.end,
@@ -675,13 +723,13 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
         onInspector={() => setInspectorOpen(true)}
       />
       <div className="workspace">
-        <Sidebar date={date} events={visibleEvents} busyUsers={busyUsers} availability={availabilityMap}
+        <Sidebar date={date} events={accessibleEvents} pendingInvitationUids={pendingInvitationUids} busyUsers={selectedFriendUsers} availability={availabilityMap}
           personalVisible={personalVisible} groupVisible={groupVisible}
           onPersonalVisible={setPersonalVisible} onGroupVisible={setGroupVisible}
           onBusyUsers={setBusyUsers}
           onCreate={openCreate} onSelectEvent={setDetailEvent}
           showCancelled={showCancelled} onShowCancelled={setShowCancelled} view={view}
-          currentUser={user} shareUsers={shareUsers} shares={calendarShares}
+          currentUser={user} friendUsers={friendUsers} shareUsers={shareUsers} sharedCalendarColors={sharedCalendarColors} shares={calendarShares}
           onSaveCalendarShare={saveCalendarShare}
           customCalendars={customCalendars}
           onAddCustomCalendar={addCustomCalendar}
@@ -698,8 +746,9 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
           })} />
         <div className={`calendar-transition calendar-${navDirection}`} key={`${view}-${date.toISOString().slice(0, 10)}`}>
           <CalendarGrid view={view} date={date} events={visibleEvents} personalEvents={personalEvents}
+            pendingInvitationUids={pendingInvitationUids}
             customCalendars={customCalendars}
-            busyUsers={busyUsers} personalVisible={personalVisible} groupVisible={groupVisible} showCancelled={showCancelled}
+            busyUsers={selectedFriendUsers} personalVisible={personalVisible} groupVisible={groupVisible} currentUser={user} sharedCalendarColors={sharedCalendarColors} showCancelled={showCancelled}
               onSelect={setDetailEvent} onQuickCreate={(_day, start, end) => {
                 setCreateMode("personal");
                 setCreateRange({ start, end });

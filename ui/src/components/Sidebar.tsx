@@ -6,10 +6,27 @@ import { ShareCalendarModal } from "./ShareCalendarModal";
 import { CreateCalendarModal } from "./CreateCalendarModal";
 
 const emptyUsers: string[] = [];
+const invitationDateFormatter = new Intl.DateTimeFormat("es", {
+  day: "numeric",
+  month: "short"
+});
+const invitationTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true
+});
+
+function formatInvitationStart(value?: string) {
+  if (!value) return "Sin fecha";
+  const date = new Date(value.replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return "Fecha no válida";
+  return `${invitationDateFormatter.format(date)} ${invitationTimeFormatter.format(date)}`;
+}
 
 interface Props {
   date: Date;
   events: GroupEvent[];
+  pendingInvitationUids: ReadonlySet<string>;
   busyUsers: string[];
   availability: Record<string, "busy" | "available">;
   personalVisible: boolean;
@@ -24,7 +41,9 @@ interface Props {
   view: "Día" | "Semana" | "Mes" | "Año" | "Agenda";
   onMoveMonth: (direction: -1 | 1) => void;
   currentUser: string;
+  friendUsers: string[];
   shareUsers: string[];
+  sharedCalendarColors: Record<string, string>;
   shares: CalendarShare[];
   onSaveCalendarShare: (calendar: SharedCalendarId, users: string[], permission: CalendarSharePermission) => void;
   customCalendars: CustomCalendar[];
@@ -44,9 +63,7 @@ export function Sidebar(props: Props) {
   const first = new Date(year, month, 1).getDay();
   const days = new Date(year, month + 1, 0).getDate();
   const cells = Array.from({ length: 42 }, (_, i) => i - first + 2);
-  const invitations = props.events.filter((event) =>
-    event.state === "PROPOSED" && event.participants.includes(props.currentUser)
-  );
+  const invitations = props.events.filter((event) => props.pendingInvitationUids.has(event.uid));
   const today = new Date();
   const active = props.date;
   const mondayIndex = (new Date(year, month, 1).getDay() + 6) % 7;
@@ -177,6 +194,15 @@ export function Sidebar(props: Props) {
             <div className="custom-calendar-actions">
               <button
                 type="button"
+                className={`share-calendar-button ${props.shares.some((share) => share.owner === props.currentUser && share.calendar === calendar.id) ? "has-shares" : ""}`}
+                aria-label={`Compartir ${calendar.name}`}
+                title={`Compartir ${calendar.name}`}
+                onClick={() => setShareCalendar(calendar.id)}
+              >
+                <Share2 size={14} />
+              </button>
+              <button
+                type="button"
                 className="delete-calendar-button"
                 aria-label={`Eliminar ${calendar.name}`}
                 title={`Eliminar ${calendar.name}`}
@@ -191,13 +217,24 @@ export function Sidebar(props: Props) {
       </section>
 
       <section className="calendar-layers">
-        <h3>Disponibilidad</h3>
-        {Array.from(new Set(props.shareUsers))
+        <h3>Amigos</h3>
+        {props.friendUsers
           .filter((user) => user.toLocaleLowerCase().includes(userSearch.trim().toLocaleLowerCase()))
           .map((user) => (
-          <label key={user}>
-            <input type="checkbox" checked={props.busyUsers.includes(user)} onChange={() => toggleUser(user)} />
-            <span className={`avatar ${user}`}>{user[0].toUpperCase()} </span>{user}
+          <label className="friend-row" key={user}>
+            <input
+              type="checkbox"
+              checked={props.busyUsers.includes(user)}
+              onChange={() => toggleUser(user)}
+              style={{
+                "--calendar-check-color": "#17212f",
+                borderColor: props.sharedCalendarColors[user],
+                backgroundColor: props.busyUsers.includes(user)
+                  ? props.sharedCalendarColors[user]
+                  : "transparent"
+              } as CSSProperties}
+            />
+            {user}
             <small className={`availability-state ${props.availability[user] ?? "unknown"}`}>
               {props.availability[user] ?? "sin datos"}
             </small>
@@ -210,7 +247,7 @@ export function Sidebar(props: Props) {
         {invitations.slice(0, 3).map((event) => (
           <button key={event.uid} onClick={() => props.onSelectEvent(event)}>
             <span className="invite-dot" />
-            <span><strong>{event.payload.title ?? "Reunión"}</strong><small>{event.payload.start?.slice(11, 16) ?? "Pendiente"}</small></span>
+            <span><strong>{event.payload.title ?? "Reunión"}</strong><small>Pendiente de respuesta · {formatInvitationStart(event.payload.start)}</small></span>
           </button>
         ))}
       </section>

@@ -52,16 +52,43 @@ export function EventDetailModal(props: Props) {
   if (!event) return null;
   const isOrganizer = event.organizer === props.currentUser;
   const isParticipant = event.participants.includes(props.currentUser);
+  const response = props.attendance[props.currentUser];
+  const visibility = event.payload.visibility ?? (event.payload.privacy === "public" ? "public" : "private");
+  const availability = event.payload.availability === "free" ? "free" : "busy";
+  const canReply = isParticipant
+    && event.state !== "CANCELLED"
+    && event.state !== "EXPIRED"
+    && (event.state === "PROPOSED" || !response || response === "NEEDS_ACTION");
+  const canClosePoll = isOrganizer && event.state === "PROPOSED";
+  const canReopen = isOrganizer && event.state !== "PROPOSED" && event.state !== "CANCELLED" && event.state !== "EXPIRED";
+  const canEditEvent = props.canEdit && event.state !== "CANCELLED" && event.state !== "EXPIRED";
+  const canDeleteEvent = props.canEdit && event.kind === "personal" && event.state !== "CANCELLED";
+  const canCancelEvent = props.canEdit && event.kind === "group" && event.state !== "CANCELLED";
+  const hasFooterActions = canClosePoll || canReopen || canEditEvent || canDeleteEvent || canCancelEvent;
+  const visibleCounters = Object.entries(props.counters)
+    .filter(([user]) => isOrganizer || user === props.currentUser);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <section className="detail-modal">
-        <header><div><small>UID {event.uid.slice(0, 18)}…</small><h2>{event.payload.title ?? "Reunión"}</h2></div><button className="icon-button" onClick={props.onClose}><X size={18} /></button></header>
+        <header><div><h2>{event.payload.title ?? "Reunión"}</h2></div><button className="icon-button" onClick={props.onClose}><X size={18} /></button></header>
         <div className="detail-meta">
           <span><b>Estado</b>{event.state}</span>
           <span><b>Secuencia</b>#{event.sequence}</span>
           <span><b>Organizador</b>{event.organizer}</span>
           <span><b>Horario</b>{formatDateTimeRange(event.payload.start, event.payload.end)}</span>
+          {isOrganizer && event.kind === "personal" && (
+            <>
+              <span><b>Visibilidad</b>{visibility === "public" ? "Público" : "Privado"}</span>
+              <span><b>Disponibilidad</b>{availability === "free" ? "Disponible" : "Ocupado"}</span>
+            </>
+          )}
         </div>
+        {event.payload.description?.trim() && (
+          <section className="event-description">
+            <h3>Descripción</h3>
+            <p>{event.payload.description}</p>
+          </section>
+        )}
         <section>
           <h3>Asistencia</h3>
           {event.participants.map((user) => (
@@ -72,29 +99,31 @@ export function EventDetailModal(props: Props) {
             </div>
           ))}
         </section>
-        {Object.keys(props.counters).length > 0 && (
+        {visibleCounters.length > 0 && (
           <section>
-            <h3>Horarios propuestos</h3>
-            {Object.entries(props.counters).map(([user, counter]) => (
-              <div className="attendee" key={user}>
-                <strong>{user}</strong>
-                <em>{formatDateTimeRange(counter.proposed_start, counter.proposed_end)}</em>
+            <h3>{isOrganizer ? "Horarios propuestos" : "Mi propuesta"}</h3>
+            {visibleCounters.map(([user, counter]) => (
+              <div className="counter-offer" key={user}>
+                <div className="counter-offer-details">
+                  <strong>{user}</strong>
+                  <em>{formatDateTimeRange(counter.proposed_start, counter.proposed_end)}</em>
+                </div>
                 {isOrganizer && event.state !== "CANCELLED" && event.state !== "EXPIRED" && (
-                  <>
+                  <div className="counter-offer-actions">
                     <button onClick={() => props.onAcceptCounter(user)}>Re-anclar</button>
                     <button onClick={() => props.onDeclineCounter(user)}>Rechazar propuesta</button>
-                  </>
+                  </div>
                 )}
               </div>
             ))}
           </section>
         )}
-        {event.state === "PROPOSED" && isParticipant && (
+        {canReply && (
           <div className="decision-actions">
             <button className="accept" onClick={() => props.onReply("ACCEPTED")}><Check size={15} /> Aceptar</button>
             <button onClick={() => props.onReply("DECLINED")}><CircleX size={15} /> Rechazar</button>
             <button onClick={() => props.onReply("TENTATIVE")}><Clock3 size={15} /> Quizá</button>
-            <button onClick={() => {
+            {event.state === "PROPOSED" && <button onClick={() => {
               const start = event.payload.start ? new Date(event.payload.start.replace(" ", "T")) : new Date();
               const end = event.payload.end ? new Date(event.payload.end.replace(" ", "T")) : new Date(start.getTime() + 60 * 60 * 1000);
               start.setHours(start.getHours() + 1);
@@ -103,11 +132,11 @@ export function EventDetailModal(props: Props) {
               setCounterStart(toLocal(start));
               setCounterEnd(toLocal(end));
               setCounterOpen(true);
-            }}>Proponer otro horario</button>
+            }}>Proponer otro horario</button>}
           </div>
         )}
         {counterOpen && event.state === "PROPOSED" && isParticipant && (
-          <div className="decision-actions">
+          <div className="counter-form">
             <label>Nuevo inicio<input type="datetime-local" value={counterStart} onChange={(e) => setCounterStart(e.target.value)} /></label>
             <label>Nuevo fin<input type="datetime-local" value={counterEnd} onChange={(e) => setCounterEnd(e.target.value)} /></label>
             <button disabled={!counterStart || !counterEnd || new Date(counterStart) >= new Date(counterEnd)}
@@ -117,13 +146,15 @@ export function EventDetailModal(props: Props) {
               }}>Enviar propuesta</button>
           </div>
         )}
-        <footer>
-          {isOrganizer && event.state === "PROPOSED" && <button onClick={props.onClosePoll}>Cerrar votación</button>}
-          {isOrganizer && event.state !== "PROPOSED" && event.state !== "CANCELLED" && event.state !== "EXPIRED" && <button onClick={props.onReopen}><RotateCcw size={14} /> Reabrir</button>}
-          {props.canEdit && event.state !== "CANCELLED" && event.state !== "EXPIRED" && <button onClick={props.onEdit}>Editar evento</button>}
-          {props.canEdit && event.kind === "personal" && event.state !== "CANCELLED" && <button className="danger" onClick={props.onDelete}>Eliminar</button>}
-          {props.canEdit && event.kind === "group" && event.state !== "CANCELLED" && <button className="danger" onClick={props.onCancel}>Cancelar reunión</button>}
-        </footer>
+        {hasFooterActions && (
+          <footer>
+            {canClosePoll && <button onClick={props.onClosePoll}>Cerrar votación</button>}
+            {canReopen && <button onClick={props.onReopen}><RotateCcw size={14} /> Reabrir</button>}
+            {canEditEvent && <button onClick={props.onEdit}>Editar evento</button>}
+            {canDeleteEvent && <button className="danger" onClick={props.onDelete}>Eliminar</button>}
+            {canCancelEvent && <button className="danger" onClick={props.onCancel}>Cancelar reunión</button>}
+          </footer>
+        )}
       </section>
     </div>
   );

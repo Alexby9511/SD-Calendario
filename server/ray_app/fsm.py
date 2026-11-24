@@ -6,6 +6,54 @@ from typing import Any, Dict, List, Optional
 from pkg.protocol.envelope import Envelope
 
 MAX_SYNC_LIMIT = 1000
+_OWNER_ONLY_EVENT_FIELDS = ("visibility", "availability", "privacy", "hide_from_freebusy")
+
+
+def _without_owner_only_event_fields(value: Dict[str, Any]) -> Dict[str, Any]:
+    for field in _OWNER_ONLY_EVENT_FIELDS:
+        value.pop(field, None)
+    payload = value.get("payload")
+    if isinstance(payload, dict):
+        for field in _OWNER_ONLY_EVENT_FIELDS:
+            payload.pop(field, None)
+    return value
+
+
+def event_view_for_user(event: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    view = copy.deepcopy(event)
+    if event.get("organizer") != user_id:
+        _without_owner_only_event_fields(view)
+    return view
+
+
+def event_calendar_shares(
+    event: Dict[str, Any],
+    calendar_shares: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    owner_shares = calendar_shares.get(event.get("organizer"), {})
+    if not isinstance(owner_shares, dict):
+        return []
+    payload = event.get("payload")
+    calendar_id = payload.get("calendar_id") if isinstance(payload, dict) else None
+    calendar_ids = [
+        calendar
+        for calendar in (event.get("kind"), calendar_id)
+        if isinstance(calendar, str)
+    ]
+    return [
+        owner_shares[calendar]
+        for calendar in dict.fromkeys(calendar_ids)
+        if isinstance(calendar, str) and calendar in owner_shares
+    ]
+
+
+def command_view_for_user(
+    command: Dict[str, Any], event: Dict[str, Any], user_id: str
+) -> Dict[str, Any]:
+    view = copy.deepcopy(command)
+    if event.get("organizer") != user_id:
+        _without_owner_only_event_fields(view)
+    return view
 
 
 class CalendarFSM:
@@ -185,6 +233,14 @@ class CalendarFSM:
 
         if not self._can_edit_event(existing, envelope.sender_id):
             return {"code": 403, "reason": "organizer_only"}
+        if envelope.sender_id != existing["organizer"]:
+            for field in _OWNER_ONLY_EVENT_FIELDS:
+                if field == "visibility":
+                    payload[field] = existing.get(field, "private")
+                elif field in existing["payload"]:
+                    payload[field] = copy.deepcopy(existing["payload"][field])
+                else:
+                    payload.pop(field, None)
         if envelope.sequence <= existing["sequence"]:
             return {"code": 409, "reason": "stale_sequence"}
         if existing["state"] in ("EXPIRED", "CANCELLED"):
@@ -621,10 +677,13 @@ class CalendarFSM:
             if not self._can_view_command(item["command"], user_id):
                 continue
             uid = item["command"]["uid"]
+            event = self.events[uid]
+            entry = copy.deepcopy(item)
+            entry["command"] = command_view_for_user(item["command"], event, user_id)
             visible_entries.append(
                 {
-                    **item,
-                    "event": copy.deepcopy(self.events[uid]),
+                    **entry,
+                    "event": event_view_for_user(event, user_id),
                     "attendance": copy.deepcopy(self.attendance.get(uid, {})),
                     "counters": copy.deepcopy(self.counters.get(uid, {})),
                 }
@@ -639,7 +698,8 @@ class CalendarFSM:
         ]
         page["snapshot"] = {
             "events": {
-                uid: copy.deepcopy(self.events[uid]) for uid in visible_uids
+                uid: event_view_for_user(self.events[uid], user_id)
+                for uid in visible_uids
             },
             "attendance": {
                 uid: copy.deepcopy(self.attendance.get(uid, {}))
@@ -718,6 +778,14 @@ class CalendarFSM:
         if not isinstance(value, dict):
             raise ValueError("event_payload_must_be_an_object")
         payload = copy.deepcopy(value)
+        description = payload.get("description", "")
+        if not isinstance(description, str):
+            raise ValueError("invalid_event_description")
+        payload["description"] = description
+        description = payload.get("description", "")
+        if not isinstance(description, str):
+            raise ValueError("invalid_event_description")
+        payload["description"] = description
         kind = str(
             payload.get(
                 "kind",
@@ -843,25 +911,23 @@ class CalendarFSM:
             event, user_id
         ):
             return True
-        share = self.calendar_shares.get(event["organizer"], {}).get(
-            event.get("kind", "")
-        )
         return bool(
-            share
-            and user_id in share.get("users", [])
-            and share.get("permission") in ("details", "edit")
+            any(
+                user_id in share.get("users", [])
+                and share.get("permission") in ("details", "edit")
+                for share in event_calendar_shares(event, self.calendar_shares)
+            )
         )
 
     def _can_edit_event(self, event: Dict[str, Any], user_id: str) -> bool:
         if event["organizer"] == user_id:
             return True
-        share = self.calendar_shares.get(event["organizer"], {}).get(
-            event.get("kind", "")
-        )
         return bool(
-            share
-            and user_id in share.get("users", [])
-            and share.get("permission") == "edit"
+            any(
+                user_id in share.get("users", [])
+                and share.get("permission") == "edit"
+                for share in event_calendar_shares(event, self.calendar_shares)
+            )
         )
 
     def _shares_for(self, user_id: str) -> List[Dict[str, Any]]:

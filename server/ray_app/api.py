@@ -17,6 +17,7 @@ if ray is not None:
         _QUERY_TIMEOUT_ERRORS += (ray_timeout_error,)
 
 from .coordinator import Coordinator, CoordinatorActor
+from .fsm import event_calendar_shares, event_view_for_user
 from .auth import (
     AuthenticationNotConfigured,
     TokenRegistry,
@@ -108,13 +109,12 @@ def _can_view_event(
         or user_id in event.get("participants", [])
     ):
         return True
-    share = calendar_shares.get(event.get("organizer"), {}).get(
-        event.get("kind", "")
-    )
     return bool(
-        share
-        and user_id in share.get("users", [])
-        and share.get("permission") in ("details", "edit")
+        any(
+            user_id in share.get("users", [])
+            and share.get("permission") in ("details", "edit")
+            for share in event_calendar_shares(event, calendar_shares)
+        )
     )
 
 
@@ -122,7 +122,7 @@ def _visible_snapshot(snapshot: Dict[str, Any], user_id: str) -> Dict[str, Any]:
     calendar_shares = snapshot.get("calendar_shares", {})
     return {
         "events": {
-            uid: event
+            uid: event_view_for_user(event, user_id)
             for uid, event in snapshot.get("events", {}).items()
             if _can_view_event(event, user_id, calendar_shares)
         },

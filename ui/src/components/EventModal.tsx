@@ -20,8 +20,8 @@ interface Props {
   checkAvailability: (users: string[], start: string, end: string) => Promise<Record<string, "busy" | "available">>;
   editingEvent: GroupEvent | null;
   onClose: () => void;
-  onSavePersonal: (event: { title: string; start: string; end: string; tzid: string; calendar_id?: string; visibility: "private" | "public"; availability: "busy" | "free"; privacy: "private" | "public"; hide: boolean }, existing?: GroupEvent) => void;
-  onSaveGroup: (event: { title: string; location: string; start: string; end: string; calendar_id?: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number }, existing?: GroupEvent) => void;
+  onSavePersonal: (event: { title: string; description: string; start: string; end: string; tzid: string; calendar_id?: string; visibility?: "private" | "public"; availability?: "busy" | "free"; privacy?: "private" | "public"; hide?: boolean }, existing?: GroupEvent) => void;
+  onSaveGroup: (event: { title: string; description: string; location: string; start: string; end: string; calendar_id?: string; participants: { user_id: string; role: "REQUIRED" | "OPTIONAL" }[]; rule: "ALL" | "MAJORITY" | "QUORUM" | "ORGANIZER"; quorum: number }, existing?: GroupEvent) => void;
 }
 
 function inputDateTime(value?: string) {
@@ -42,6 +42,7 @@ export function EventModal(props: Props) {
   const [tab, setTab] = useState<"personal" | "group">("personal");
   const [customCalendarId, setCustomCalendarId] = useState("");
   const [title, setTitle] = useState("Nueva actividad");
+  const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
   const [start, setStart] = useState(() => defaultLocalTime(1));
   const [end, setEnd] = useState(() => defaultLocalTime(2));
@@ -77,6 +78,7 @@ export function EventModal(props: Props) {
   const conflicts = (tab === "group" ? [props.user, ...participants] : [props.user])
     .some((candidate) => checkedAvailability[candidate] === "busy");
   const invalidWindow = !title.trim() || !start || !end || new Date(start) >= new Date(end);
+  const canEditOwnerSettings = !props.editingEvent || props.editingEvent.organizer === props.user;
 
   useEffect(() => {
     if (props.open) {
@@ -84,6 +86,7 @@ export function EventModal(props: Props) {
       setTab(event?.kind ?? props.initialMode);
       setCustomCalendarId(initialCustomCalendarId(event, props.customCalendars));
       setTitle(event?.payload.title ?? "Nueva actividad");
+      setDescription(event?.payload.description ?? "");
       setLocation(event?.payload.location ?? "");
       setStart(inputDateTime(event?.payload.start) || props.initialStart || defaultLocalTime(1));
       setEnd(inputDateTime(event?.payload.end) || props.initialEnd || defaultLocalTime(2));
@@ -122,19 +125,23 @@ export function EventModal(props: Props) {
     if (tab === "personal") {
       props.onSavePersonal({
         title,
+        description,
         start: new Date(start).toISOString(),
         end: new Date(end).toISOString(),
         tzid: Intl.DateTimeFormat().resolvedOptions().timeZone,
         calendar_id: customCalendarId || undefined,
-        visibility,
-        availability,
-        privacy: visibility,
-        hide: hideFromFreebusy
+        ...(canEditOwnerSettings ? {
+          visibility,
+          availability,
+          privacy: visibility,
+          hide: hideFromFreebusy
+        } : {})
       }, props.editingEvent ?? undefined);
     } else {
       if (participants.length === 0) return;
       props.onSaveGroup({
         title,
+        description,
         location,
         start: new Date(start).toISOString(),
         end: new Date(end).toISOString(),
@@ -159,6 +166,7 @@ export function EventModal(props: Props) {
         </div>
         <div className="modal-body">
           <label>Título<input value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+          <label>Descripción<textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Añade detalles del evento" /></label>
           <label>Calendario personalizado (opcional)
             <select value={customCalendarId} onChange={(event) => setCustomCalendarId(event.target.value)}>
               <option value="">Sin calendario personalizado</option>
@@ -175,7 +183,7 @@ export function EventModal(props: Props) {
             <label>Fin<input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></label>
           </div>
           {tab === "personal" ? (
-            <>
+            canEditOwnerSettings && <>
               <div className="field-row">
                 <label>Visibilidad<select value={visibility} onChange={(e) => setVisibility(e.target.value as typeof visibility)}>
                   <option value="private">Privado</option>

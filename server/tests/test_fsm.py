@@ -317,6 +317,78 @@ def test_calendar_share_controls_private_visibility_and_edit_access():
     assert fsm.events[event["uid"]]["state"] == "CANCELLED"
 
 
+def test_custom_calendar_share_controls_event_visibility_and_edit_access():
+    fsm = CalendarFSM()
+    custom_calendar_id = "custom-calendar-123"
+    share = request()
+    share["type"] = "SHARE_CALENDAR"
+    share["uid"] = f"alice:calendar:{custom_calendar_id}"
+    share["payload"] = {
+        "calendar": custom_calendar_id,
+        "users": ["bob"],
+        "permission": "details",
+    }
+    assert fsm.apply(share)["code"] == 200
+
+    shared_event = request(
+        msg_id="01J00000000000000000000040",
+        uid="alice:custom-event",
+    )
+    shared_event["payload"] = {
+        "kind": "personal",
+        "title": "Capa compartida",
+        "calendar_id": custom_calendar_id,
+    }
+    assert fsm.apply(shared_event)["code"] == 200
+
+    private_event = request(
+        msg_id="01J00000000000000000000041",
+        uid="alice:private-event",
+    )
+    private_event["payload"] = {"kind": "personal", "title": "Otra capa"}
+    assert fsm.apply(private_event)["code"] == 200
+    assert set(fsm.sync_for("bob")["snapshot"]["events"]) == {shared_event["uid"]}
+
+    view_only_update = request(
+        msg_id="01J00000000000000000000042",
+        sender="bob",
+        sequence=2,
+        uid=shared_event["uid"],
+    )
+    view_only_update["payload"] = {
+        "kind": "personal",
+        "title": "No autorizado",
+        "calendar_id": custom_calendar_id,
+    }
+    assert fsm.apply(view_only_update)["code"] == 403
+
+    share["msg_id"] = "01J00000000000000000000043"
+    share["payload"]["permission"] = "edit"
+    assert fsm.apply(share)["code"] == 200
+
+    edit = request(
+        msg_id="01J00000000000000000000044",
+        sender="bob",
+        sequence=2,
+        uid=shared_event["uid"],
+    )
+    edit["payload"] = {
+        "kind": "personal",
+        "title": "Editado en capa compartida",
+        "calendar_id": custom_calendar_id,
+    }
+    assert fsm.apply(edit)["code"] == 200
+
+    private_edit = request(
+        msg_id="01J00000000000000000000045",
+        sender="bob",
+        sequence=2,
+        uid=private_event["uid"],
+    )
+    private_edit["payload"] = {"kind": "personal", "title": "No autorizado"}
+    assert fsm.apply(private_edit)["code"] == 403
+
+
 def test_personal_event_of_another_user_does_not_block_or_leak():
     fsm = CalendarFSM()
     alice_event = request()
@@ -598,6 +670,7 @@ def test_private_group_is_visible_only_to_organizer_and_attendees_in_sync():
     proposal["payload"] = {
         "kind": "group",
         "title": "Privado",
+        "description": "Notas privadas",
         "start": "2026-11-21T10:00:00Z",
         "end": "2026-11-21T11:00:00Z",
         "participants": ["bob"],
@@ -607,6 +680,7 @@ def test_private_group_is_visible_only_to_organizer_and_attendees_in_sync():
 
     assert fsm.sync_for("alice")["entries"]
     assert fsm.sync_for("bob")["entries"]
+    assert fsm.sync_for("bob")["snapshot"]["events"][proposal["uid"]]["payload"]["description"] == "Notas privadas"
     assert fsm.sync_for("carol")["entries"] == []
     assert fsm.sync_for("carol")["next"] == 1
     assert fsm.sync_for("carol")["snapshot"]["events"] == {}
@@ -623,6 +697,100 @@ def test_public_event_is_visible_to_other_users_in_sync():
     fsm.apply(event)
 
     assert fsm.sync_for("bob")["entries"][0]["command"]["uid"] == event["uid"]
+
+
+def test_public_event_description_is_shared_but_owner_settings_are_redacted():
+    fsm = CalendarFSM()
+    event = request()
+    event["payload"] = {
+        "kind": "personal",
+        "title": "Public",
+        "description": "Detalles del evento",
+        "visibility": "public",
+        "privacy": "public",
+        "availability": "free",
+        "hide_from_freebusy": True,
+    }
+
+    assert fsm.apply(event)["code"] == 200
+    owner = fsm.sync_for("alice")
+    viewer = fsm.sync_for("bob")
+    owner_event = owner["snapshot"]["events"][event["uid"]]
+    viewer_event = viewer["snapshot"]["events"][event["uid"]]
+
+    assert owner_event["payload"]["description"] == "Detalles del evento"
+    assert owner_event["payload"]["visibility"] == "public"
+    assert owner_event["payload"]["availability"] == "free"
+    assert owner_event["payload"]["hide_from_freebusy"] is True
+    assert viewer_event["payload"]["description"] == "Detalles del evento"
+    for field in ("visibility", "availability", "privacy", "hide_from_freebusy"):
+        assert field not in viewer_event
+        assert field not in viewer_event["payload"]
+        assert field not in viewer["entries"][0]["command"]["payload"]
+        assert field not in viewer["entries"][0]["event"]["payload"]
+
+
+def test_shared_editor_cannot_change_owner_only_event_settings():
+    fsm = CalendarFSM()
+    share = request()
+    share["type"] = "SHARE_CALENDAR"
+    share["uid"] = "alice:calendar:personal"
+    share["payload"] = {
+        "calendar": "personal",
+        "users": ["bob"],
+        "permission": "edit",
+    }
+    assert fsm.apply(share)["code"] == 200
+
+    event = request(msg_id="01J00000000000000000000037")
+    event["payload"] = {
+        "kind": "personal",
+        "title": "Public",
+        "description": "Original description",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "visibility": "public",
+        "privacy": "public",
+        "availability": "free",
+        "hide_from_freebusy": True,
+    }
+    assert fsm.apply(event)["code"] == 200
+
+    update = request(
+        msg_id="01J00000000000000000000038",
+        sequence=2,
+        sender="bob",
+        uid=event["uid"],
+    )
+    update["payload"] = {
+        **event["payload"],
+        "title": "Edited by shared user",
+        "description": "Updated description",
+        "visibility": "private",
+        "privacy": "private",
+        "availability": "busy",
+        "hide_from_freebusy": False,
+    }
+    assert fsm.apply(update)["code"] == 200
+
+    stored = fsm.events[event["uid"]]
+    assert stored["visibility"] == "public"
+    assert stored["payload"]["visibility"] == "public"
+    assert stored["payload"]["privacy"] == "public"
+    assert stored["payload"]["availability"] == "free"
+    assert stored["payload"]["hide_from_freebusy"] is True
+    assert stored["payload"]["description"] == "Updated description"
+
+
+def test_event_description_must_be_text():
+    fsm = CalendarFSM()
+    event = request()
+    event["payload"]["description"] = {"text": "not a string"}
+
+    result = fsm.apply(event)
+
+    assert result["code"] == 422
+    assert result["result"]["reason"] == "invalid_event_description"
 
 
 def test_sync_limits_are_capped_and_snapshot_can_be_omitted_from_pages():

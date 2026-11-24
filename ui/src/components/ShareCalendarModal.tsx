@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Search, UserPlus, X } from "lucide-react";
 import type { CalendarSharePermission, SharedCalendarId } from "../types/protocol";
 
@@ -24,9 +24,13 @@ export function ShareCalendarModal(props: Props) {
   const [query, setQuery] = useState("");
   const [selectedUsers, setSelectedUsers] = useState<string[]>([]);
   const [permission, setPermission] = useState<CalendarSharePermission>("freebusy");
+  const previousDialog = useRef({ open: props.open, calendar: props.calendar });
 
   useEffect(() => {
-    if (!props.open) return;
+    const shouldInitialize = props.open
+      && (!previousDialog.current.open || previousDialog.current.calendar !== props.calendar);
+    previousDialog.current = { open: props.open, calendar: props.calendar };
+    if (!shouldInitialize) return;
     setQuery("");
     setSelectedUsers(props.initialUsers);
     setPermission(props.initialPermission);

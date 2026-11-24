@@ -63,7 +63,14 @@ class FakeCluster:
                     "organizer": "bob",
                     "participants": [],
                     "visibility": "public",
-                    "payload": {"title": "Público"},
+                    "payload": {
+                        "title": "Público",
+                        "description": "Detalles públicos",
+                        "visibility": "public",
+                        "privacy": "public",
+                        "availability": "free",
+                        "hide_from_freebusy": True,
+                    },
                 },
             },
             "applied_index": 1,
@@ -319,6 +326,27 @@ def test_private_event_details_are_hidden_from_other_users(client):
     assert public["value"]["payload"]["title"] == "Público"
 
 
+def test_public_snapshot_shares_description_but_hides_owner_settings(client):
+    api.set_cluster(FakeCluster())
+
+    public = client.get(
+        "/v1/kv/bob:01J00000000000000000000002",
+        headers=headers("alice"),
+    ).json()["value"]
+    owner = client.get(
+        "/v1/kv/bob:01J00000000000000000000002",
+        headers=headers("bob"),
+    ).json()["value"]
+
+    assert public["payload"]["description"] == "Detalles públicos"
+    assert owner["payload"]["description"] == "Detalles públicos"
+    for field in ("visibility", "availability", "privacy", "hide_from_freebusy"):
+        assert field not in public
+        assert field not in public["payload"]
+    assert owner["visibility"] == "public"
+    assert owner["payload"]["availability"] == "free"
+
+
 def test_snapshot_contains_only_private_events_the_user_can_see(client):
     api.set_cluster(FakeCluster())
 
@@ -327,6 +355,41 @@ def test_snapshot_contains_only_private_events_the_user_can_see(client):
     assert set(response.json()["events"]) == {
         "bob:01J00000000000000000000002"
     }
+
+
+def test_snapshot_includes_events_from_a_shared_custom_calendar():
+    shared_event = {
+        "uid": "alice:custom-event",
+        "organizer": "alice",
+        "kind": "personal",
+        "participants": [],
+        "visibility": "private",
+        "payload": {"title": "Capa compartida", "calendar_id": "custom-calendar-123"},
+    }
+    private_event = {
+        **shared_event,
+        "uid": "alice:private-event",
+        "payload": {"title": "Otra capa"},
+    }
+    snapshot = {
+        "events": {
+            shared_event["uid"]: shared_event,
+            private_event["uid"]: private_event,
+        },
+        "calendar_shares": {
+            "alice": {
+                "custom-calendar-123": {
+                    "users": ["bob"],
+                    "permission": "details",
+                }
+            }
+        },
+        "applied_index": 1,
+    }
+
+    visible = api._visible_snapshot(snapshot, "bob")
+
+    assert set(visible["events"]) == {shared_event["uid"]}
 
 
 def test_conflicts_cannot_be_queried_for_another_user(client):

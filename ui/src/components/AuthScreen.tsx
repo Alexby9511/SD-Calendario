@@ -1,5 +1,4 @@
 import { FormEvent, useState } from "react";
-import { CalendarDays } from "lucide-react";
 import { login, register } from "../lib/api";
 import type { AuthSession } from "../lib/api";
 
@@ -38,7 +37,6 @@ export function AuthScreen({ onAuthenticated }: Props) {
           <strong>SD Calendar</strong>
         </div>
         <div className="auth-heading">
-          <CalendarDays size={24} />
           <h1 id="auth-title">{mode === "register" ? "Crea tu cuenta" : "Inicia sesión"}</h1>
           <p>
             {mode === "register"

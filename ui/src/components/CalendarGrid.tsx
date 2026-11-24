@@ -1,19 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
-import { Lock, ShieldCheck } from "lucide-react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
+import { Megaphone, ShieldCheck, UserRound, UsersRound, VolumeX } from "lucide-react";
 import type { CustomCalendar, GroupEvent } from "../types/protocol";
 import { localConflict } from "../lib/conflicts";
-import { isEventCalendarVisible } from "../lib/calendars";
+import { eventCustomCalendarId, isEventCalendarVisible } from "../lib/calendars";
 
 interface Props {
   view: "Día" | "Semana" | "Mes" | "Año" | "Agenda";
   date: Date;
   events: GroupEvent[];
+  pendingInvitationUids: ReadonlySet<string>;
   personalEvents: GroupEvent[];
   customCalendars: CustomCalendar[];
   busyUsers: string[];
   personalVisible: boolean;
   groupVisible: boolean;
+  currentUser: string;
+  sharedCalendarColors: Record<string, string>;
   showCancelled: boolean;
   onSelect: (event: GroupEvent) => void;
   onQuickCreate?: (date: Date, start: string, end: string) => void;
@@ -40,6 +43,119 @@ interface PreviewSelection {
   dayIndex: number;
   startMinute: number;
   endMinute: number;
+}
+
+type EventStyle = CSSProperties & {
+  "--shared-calendar-color"?: string;
+  "--event-accent-color"?: string;
+  "--event-layer-color"?: string;
+};
+
+interface EventVisuals {
+  sharedColor?: string;
+  layer?: CustomCalendar;
+  style: EventStyle;
+}
+
+type EventCardView = "grid" | "month" | "agenda";
+
+function getEventBackgroundColor(
+  event: GroupEvent,
+  view: EventCardView,
+  isPendingInvitation: boolean,
+  sharedColor?: string
+) {
+  if (isPendingInvitation) return "rgba(168,199,250,.12)";
+  if (sharedColor) return sharedColor;
+  if (view === "agenda") return "transparent";
+  if (view === "month") {
+    return event.state === "CONFIRMED" ? "#6e93cc" : "rgba(168,199,250,.14)";
+  }
+  if (event.state === "CANCELLED") return "transparent";
+  if (event.state === "CONFIRMED") return "#6e93cc";
+  if (event.state === "PROPOSED") return "rgba(168,199,250,.12)";
+  return event.kind === "personal" ? "#81c995" : "#8ab4f8";
+}
+
+function getEventLeftAccentColor(
+  event: GroupEvent,
+  layer: CustomCalendar | undefined,
+  eventBackgroundColor: string
+) {
+  if (layer?.color.trim()) return layer.color;
+
+  const backgroundColor = eventBackgroundColor.trim() || (
+    event.state === "CONFIRMED" ? "#6e93cc" : "#8ab4f8"
+  );
+  return `color-mix(in srgb, ${backgroundColor} 72%, black)`;
+}
+
+function eventVisuals(
+  event: GroupEvent,
+  customCalendars: CustomCalendar[],
+  currentUser: string,
+  sharedCalendarColors: Record<string, string>,
+  view: EventCardView,
+  isPendingInvitation: boolean
+): EventVisuals {
+  const isMyInvitation = event.kind === "group"
+    && event.organizer !== currentUser
+    && event.participants.includes(currentUser);
+  const sharedColor = isMyInvitation || event.organizer === currentUser
+    ? undefined
+    : sharedCalendarColors[event.organizer];
+  const calendarId = eventCustomCalendarId(event, customCalendars);
+  const layer = calendarId
+    ? customCalendars.find((calendar) => calendar.id === calendarId)
+    : undefined;
+  const accentColor = sharedColor
+    ?? (event.state === "CONFIRMED"
+      ? "#6e93cc"
+      : event.kind === "personal"
+        ? "#81c995"
+        : "#8ab4f8");
+  const backgroundColor = getEventBackgroundColor(event, view, isPendingInvitation, sharedColor);
+  const layerColor = getEventLeftAccentColor(event, layer, backgroundColor);
+  const hasDashedBorder = isPendingInvitation || event.state === "PROPOSED";
+
+  return {
+    sharedColor,
+    layer,
+    style: {
+      "--event-accent-color": accentColor,
+      "--event-layer-color": layerColor,
+      ...(!hasDashedBorder ? { borderLeft: `4px solid ${layerColor}` } : {}),
+      ...(sharedColor ? { "--shared-calendar-color": sharedColor } : {})
+    }
+  };
+}
+
+function EventIndicators({ event, layer }: { event: GroupEvent; layer?: CustomCalendar }) {
+  const visibility = event.payload.visibility ?? event.payload.privacy;
+  return (
+    <span className="event-indicators">
+      {event.kind === "personal"
+        ? <span role="img" aria-label="Evento personal" title="Evento personal"><UserRound size={11} /></span>
+        : <span role="img" aria-label="Reunión" title="Reunión"><UsersRound size={11} /></span>}
+      {visibility === "private" && (
+        <span role="img" aria-label="Privado" title="Privado"><VolumeX size={11} /></span>
+      )}
+      {visibility === "public" && (
+        <span role="img" aria-label="Público" title="Público"><Megaphone size={11} /></span>
+      )}
+      {event.kind === "group" && event.state === "CONFIRMED" && (
+        <span role="img" aria-label="Reunión confirmada" title="Reunión confirmada"><ShieldCheck size={11} /></span>
+      )}
+      {layer && (
+        <span
+          className="event-layer-indicator"
+          style={{ backgroundColor: layer.color }}
+          aria-label={`Capa ${layer.name}`}
+          title={`Capa ${layer.name}`}
+        />
+      )}
+    </span>
+  );
 }
 
 function formatHour(hour: number) {
@@ -95,7 +211,7 @@ export function CalendarGrid(props: Props) {
     return () => observer.disconnect();
   }, [props.view]);
   const visibleEvents = props.events.filter((event) =>
-    isEventCalendarVisible(event, props.customCalendars, props.personalVisible, props.groupVisible)
+    isEventCalendarVisible(event, props.customCalendars, props.personalVisible, props.groupVisible, props.currentUser)
     && (props.showCancelled || event.state !== "CANCELLED")
   );
   const days = (props.view === "Día" ? [0] : [0, 1, 2, 3, 4, 5, 6]).map((i) => {
@@ -230,12 +346,34 @@ export function CalendarGrid(props: Props) {
   if (props.view === "Agenda") {
     return (
       <main className="agenda-view">
-        {visibleEvents.map((event) => (
-          <button key={event.uid} onClick={() => props.onSelect(event)} className={`agenda-item state-${event.state.toLowerCase()}`}>
-            <time>{event.payload.start?.replace("T", " ").slice(0, 16)}</time>
-            <div><strong>{event.payload.title ?? "Evento"}</strong><small>{stateLabel(event.state)}</small></div>
-          </button>
-        ))}
+        {visibleEvents.map((event) => {
+          const isPendingInvitation = props.pendingInvitationUids.has(event.uid);
+          const visuals = eventVisuals(
+            event,
+            props.customCalendars,
+            props.currentUser,
+            props.sharedCalendarColors,
+            "agenda",
+            isPendingInvitation
+          );
+          return (
+            <button
+              key={event.uid}
+              onClick={() => props.onSelect(event)}
+              className={`agenda-item state-${event.state.toLowerCase()}${isPendingInvitation ? " pending-invitation" : ""}${visuals.sharedColor ? " shared-calendar-event" : ""}${visuals.layer ? " layer-calendar-event" : ""}`}
+              style={visuals.style}
+            >
+              <time>{event.payload.start?.replace("T", " ").slice(0, 16)}</time>
+              <div>
+                <EventIndicators event={event} layer={visuals.layer} />
+                <strong>{event.payload.title ?? "Evento"}</strong>
+                <small>
+                  {props.pendingInvitationUids.has(event.uid) ? "Pendiente de respuesta" : stateLabel(event.state)}
+                </small>
+              </div>
+            </button>
+          );
+        })}
       </main>
     );
   }
@@ -312,11 +450,29 @@ export function CalendarGrid(props: Props) {
               day.toDateString() === new Date().toDateString() ? "today" :
               day.toDateString() === props.date.toDateString() ? "active-date" : ""
             }>{day.getDate()}</span>
-            {visibleEvents.filter((event) => event.payload.start?.slice(0, 10) === `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`).map((event) => (
-              <button key={event.uid} onClick={() => props.onSelect(event)} className={`month-event state-${event.state.toLowerCase()}`}>
-                {event.kind === "personal" ? <Lock size={10} /> : null}{event.payload.title}
-              </button>
-            ))}
+            {visibleEvents.filter((event) => event.payload.start?.slice(0, 10) === `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`).map((event) => {
+              const isPendingInvitation = props.pendingInvitationUids.has(event.uid);
+              const visuals = eventVisuals(
+                event,
+                props.customCalendars,
+                props.currentUser,
+                props.sharedCalendarColors,
+                "month",
+                isPendingInvitation
+              );
+              return (
+                <button
+                  key={event.uid}
+                  onClick={() => props.onSelect(event)}
+                  className={`month-event state-${event.state.toLowerCase()}${isPendingInvitation ? " pending-invitation" : ""}${visuals.sharedColor ? " shared-calendar-event" : ""}${visuals.layer ? " layer-calendar-event" : ""}`}
+                  style={visuals.style}
+                  title={isPendingInvitation ? "Pendiente de respuesta" : undefined}
+                >
+                  <EventIndicators event={event} layer={visuals.layer} />
+                  {event.payload.title}
+                </button>
+              );
+            })}
           </div>
         ))}
       </main>
@@ -342,6 +498,15 @@ export function CalendarGrid(props: Props) {
         </div>
       ))}
       {visibleEvents.map((event, i) => {
+        const isPendingInvitation = props.pendingInvitationUids.has(event.uid);
+        const visuals = eventVisuals(
+          event,
+          props.customCalendars,
+          props.currentUser,
+          props.sharedCalendarColors,
+          "grid",
+          isPendingInvitation
+        );
         const start = event.payload.start ? new Date(event.payload.start.replace(" ", "T")) : null;
         const end = event.payload.end ? new Date(event.payload.end.replace(" ", "T")) : null;
         const dayIndex = start
@@ -358,8 +523,9 @@ export function CalendarGrid(props: Props) {
           <button
             key={event.uid}
             onClick={() => props.onSelect(event)}
-            className={`calendar-event state-${event.state.toLowerCase()} ${event.kind === "personal" ? "personal-event" : ""}${conflict ? " has-conflict" : ""}`}
+            className={`calendar-event state-${event.state.toLowerCase()} ${event.kind === "personal" ? "personal-event" : ""}${conflict ? " has-conflict" : ""}${isPendingInvitation ? " pending-invitation" : ""}${visuals.sharedColor ? " shared-calendar-event" : ""}${visuals.layer ? " layer-calendar-event" : ""}`}
             style={{
+              ...visuals.style,
               left: props.view === "Día"
                 ? 74
                 : 68 + ((gridWidth - 68) / 7) * dayIndex + 6,
@@ -371,10 +537,9 @@ export function CalendarGrid(props: Props) {
               minHeight: 0
             }}
           >
-            {event.kind === "personal" && <Lock size={12} />}
-            {event.state === "CONFIRMED" && <ShieldCheck size={12} />}
+            <EventIndicators event={event} layer={visuals.layer} />
             <strong>{event.payload.title ?? "Evento"}</strong>
-            <span>{start ? formatTime(start) : "9:00 AM"} · {stateLabel(event.state)}</span>
+            <span>{start ? formatTime(start) : "9:00 AM"} · {isPendingInvitation ? "PENDIENTE" : stateLabel(event.state)}</span>
           </button>
         );
       })}
