@@ -14,10 +14,31 @@ interface DeviceKey {
   keyId: string;
 }
 
-export function ensureDeviceKeys(senderId?: string): Record<string, DeviceKey> {
+function readDeviceKeys(): Record<string, DeviceKey> {
   const stored = localStorage.getItem("sd-calendar-device-keys");
-  const keys: Record<string, DeviceKey> = stored ? JSON.parse(stored) : {};
-  if (senderId && !keys[senderId]) {
+  if (!stored) return {};
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed as Record<string, DeviceKey>;
+  } catch {
+    return {};
+  }
+}
+
+function isValidDeviceKey(value: DeviceKey | undefined): value is DeviceKey {
+  return (
+    typeof value?.privateKey === "string" &&
+    typeof value.publicKey === "string" &&
+    typeof value.keyId === "string"
+  );
+}
+
+export function ensureDeviceKeys(senderId?: string): Record<string, DeviceKey> {
+  const keys = readDeviceKeys();
+  if (senderId && !isValidDeviceKey(keys[senderId])) {
     const privateBytes = ed.utils.randomPrivateKey();
     const publicBytes = ed.getPublicKey(privateBytes);
     const privateKey = toHex(privateBytes);

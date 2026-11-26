@@ -18,7 +18,21 @@ function cursorKey(deployment: string, user: string): string {
 }
 
 export function getOutbox(): OutboxItem[] {
-  return JSON.parse(localStorage.getItem(OUTBOX_KEY) ?? "[]");
+  const raw = localStorage.getItem(OUTBOX_KEY);
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is OutboxItem =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as OutboxItem).envelope?.msg_id === "string"
+    );
+  } catch {
+    // A corrupt value must not white-screen the app; drop it and start fresh.
+    return [];
+  }
 }
 
 export function enqueue(envelope: Envelope) {
@@ -44,7 +58,10 @@ export function updateOutbox(msgId: string, patch: Partial<OutboxItem>) {
 }
 
 export function getCursor(deployment: string, user: string): number {
-  return Number(localStorage.getItem(cursorKey(deployment, user)) ?? "0");
+  const stored = Number(
+    localStorage.getItem(cursorKey(deployment, user)) ?? "0"
+  );
+  return Number.isInteger(stored) && stored >= 0 ? stored : 0;
 }
 
 export function advanceCursor(
