@@ -279,6 +279,9 @@ def main() -> None:
         from server.ray_app.ray_monitor import RayConnectionMonitor
 
         def reattach_raft_cluster() -> None:
+            from server.ray_app.api import reset_coordinator
+
+            reset_coordinator()
             if args.raft_replicas > 0:
                 start_raft_cluster(
                     args.raft_replicas,

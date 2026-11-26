@@ -69,6 +69,14 @@ def test_status_and_command(client):
     assert status["middleware"] == "local"
 
 
+def test_reset_coordinator_drops_the_cached_handle(monkeypatch):
+    monkeypatch.setattr(api, "coordinator_actor", object())
+
+    api.reset_coordinator()
+
+    assert api.coordinator_actor is None
+
+
 def test_sync_rejects_limits_over_one_thousand(client):
     response = client.get("/v1/sync?limit=1001", headers=headers())
 

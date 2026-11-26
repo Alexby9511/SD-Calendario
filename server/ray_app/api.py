@@ -42,6 +42,16 @@ def set_cluster(cluster: Optional[RaftCluster]) -> None:
     raft_cluster = cluster
 
 
+def reset_coordinator() -> None:
+    """Drop the cached coordinator handle after the Ray head restarts.
+
+    The actor is not detached, so it dies with the old head job. Keeping the
+    handle would send every coordinator request to a dead actor.
+    """
+    global coordinator_actor
+    coordinator_actor = None
+
+
 def get_cluster() -> Optional[RaftCluster]:
     return raft_cluster
 
