@@ -400,9 +400,14 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
     }
     syncRunning.current = true;
     try {
+      // A transient failure must stop the queue for that event: sending a
+      // later command first would break the per-event sequence and the server
+      // would reject it as a sequence gap. Other events can still progress.
+      const blockedEvents = new Set<string>();
       for (const item of getOutbox()) {
         if (item.state !== "PENDING" && item.state !== "503 Retry") continue;
         if (item.envelope.sender_id !== user) continue;
+        if (blockedEvents.has(item.envelope.uid)) continue;
         try {
           const response = await applyCommand(item.envelope, token);
           if (response.code === 200) {
@@ -418,11 +423,13 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
               updateOutbox(item.envelope.msg_id, { state: "409 Conflict", error: reason });
             }
           } else if (response.code === 503) {
+            blockedEvents.add(item.envelope.uid);
             updateOutbox(item.envelope.msg_id, { state: "503 Retry", attempts: item.attempts + 1, error: String(response.result?.reason ?? "") });
           } else {
             updateOutbox(item.envelope.msg_id, { state: "Rejected", error: String(response.result?.reason ?? response.detail?.reason ?? `HTTP ${response.code}`) });
           }
         } catch (error) {
+          blockedEvents.add(item.envelope.uid);
           updateOutbox(item.envelope.msg_id, {
             state: "503 Retry",
             attempts: item.attempts + 1,
