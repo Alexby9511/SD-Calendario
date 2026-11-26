@@ -96,12 +96,19 @@ write_and_check() {
   local uid="alice:${RUN_ID}-${pair_number}"
   local msg_id="${RUN_ID}-${pair_number}"
   local sent_at
+  local start
+  local end
   local response
   sent_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  # Every pair needs its own window: the events stay in the state machine, and
+  # reusing one window would make every event after the first collide with the
+  # organizer's own calendar (409 organizer_schedule_conflict).
+  start="$(date -u -d "@$(( $(date -u -d '2026-11-22T00:00:00Z' +%s) + pair_number * 86400 ))" '+%Y-%m-%dT%H:%M:%SZ')"
+  end="$(date -u -d "@$(( $(date -u -d '2026-11-22T00:00:00Z' +%s) + pair_number * 86400 + 3600 ))" '+%Y-%m-%dT%H:%M:%SZ')"
   response="$(curl -fsS -X POST "$API_URL/v1/commands" \
     -H "$AUTH_HEADER" \
     -H 'Content-Type: application/json' \
-    -d "{\"deployment_id\":\"dep1\",\"group_id\":\"team\",\"msg_id\":\"$msg_id\",\"type\":\"REQUEST\",\"uid\":\"$uid\",\"sender_id\":\"alice\",\"key_id\":\"key1\",\"sequence\":1,\"seen_sequence\":0,\"client_sent_at\":\"$sent_at\",\"payload\":{\"title\":\"Prueba de resiliencia\",\"start\":\"2026-11-22T00:00:00Z\",\"end\":\"2026-11-22T01:00:00Z\",\"visibility\":\"private\"}}")" \
+    -d "{\"deployment_id\":\"dep1\",\"group_id\":\"team\",\"msg_id\":\"$msg_id\",\"type\":\"REQUEST\",\"uid\":\"$uid\",\"sender_id\":\"alice\",\"key_id\":\"key1\",\"sequence\":1,\"seen_sequence\":0,\"client_sent_at\":\"$sent_at\",\"payload\":{\"title\":\"Prueba de resiliencia\",\"start\":\"$start\",\"end\":\"$end\",\"visibility\":\"private\"}}")" \
     || return 1
   printf '%s' "$response" | python3 -c \
     'import json,sys; d=json.load(sys.stdin); assert d.get("code") == 200, d' \
