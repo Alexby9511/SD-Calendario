@@ -276,6 +276,33 @@ def test_data_routes_require_a_bearer_token(client):
     assert response.status_code == 401
 
 
+def test_invalid_bearer_token_is_401_when_only_the_signer_is_configured(
+    client, monkeypatch
+):
+    monkeypatch.delenv("SDCAL_API_TOKENS")
+
+    response = client.get(
+        "/v1/status", headers={"Authorization": "Bearer not-a-token"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["reason"] == "invalid_bearer_token"
+
+
+def test_malformed_legacy_tokens_are_a_configuration_error(client, monkeypatch):
+    monkeypatch.setenv("SDCAL_API_TOKENS", "{not json")
+
+    response = client.get(
+        "/v1/status", headers={"Authorization": f"Bearer {'a' * 40}"}
+    )
+
+    assert response.status_code == 503
+    assert (
+        response.json()["detail"]["reason"]
+        == "authentication_configuration_invalid"
+    )
+
+
 def test_command_sender_must_match_authenticated_identity(client):
     body = command("01J00000000000000000000004")
     body["sender_id"] = "bob"

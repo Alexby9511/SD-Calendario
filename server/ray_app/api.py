@@ -102,11 +102,25 @@ def authenticated_user(authorization: Optional[str] = Header(default=None)) -> s
             pass
 
     try:
-        return TokenRegistry.from_environment().authenticate(token.strip())
+        registry = TokenRegistry.from_environment()
     except AuthenticationNotConfigured as exc:
+        if signer is not None:
+            # Authentication is configured, so the bearer token is simply
+            # invalid. Reporting "not configured" would hide that from clients.
+            raise HTTPException(
+                status_code=401, detail={"reason": "invalid_bearer_token"}
+            ) from exc
         raise HTTPException(
             status_code=503, detail={"reason": "authentication_not_configured"}
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"reason": "authentication_configuration_invalid"},
+        ) from exc
+
+    try:
+        return registry.authenticate(token.strip())
     except ValueError as exc:
         raise HTTPException(
             status_code=401, detail={"reason": "invalid_bearer_token"}
