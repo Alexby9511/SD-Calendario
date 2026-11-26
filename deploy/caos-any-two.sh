@@ -63,9 +63,11 @@ wait_for() {
   return 1
 }
 choose_api() {
-  local failed_api="$1"
+  local first="$1"
+  local second="$2"
   for index in $(seq 1 "$APIS"); do
-    if [ "sdcal-api-$index" != "$failed_api" ]; then
+    local candidate="sdcal-api-$index"
+    if [ "$candidate" != "$first" ] && [ "$candidate" != "$second" ]; then
       API_URL="http://localhost:$((8080 + index))"
       return 0
     fi
@@ -123,10 +125,7 @@ for ((first_index = 0; first_index < ${#CONTAINERS[@]}; first_index++)); do
     pair_number=$((pair_number + 1))
     log "par $pair_number/36: caída de $first y $second"
 
-    failed_api=""
-    [[ "$first" == sdcal-api-* ]] && failed_api="$first"
-    [[ "$second" == sdcal-api-* ]] && failed_api="$second"
-    choose_api "$failed_api" || fail "no queda una API disponible"
+    choose_api "$first" "$second" || fail "no queda una API disponible"
 
     for container in "$first" "$second"; do
       if [ "$container" = "ray-head" ]; then
