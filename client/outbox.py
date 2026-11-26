@@ -2,6 +2,10 @@ import json
 import sqlite3
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+# Status codes that describe a command the server will keep rejecting: the
+# payload or the identity is wrong, so retrying it cannot help.
+PERMANENT_REJECTION_CODES = frozenset({400, 403, 404, 410, 422})
+
 
 class Outbox:
     """Durable command outbox and sync inbox for an offline-first client."""
@@ -102,6 +106,10 @@ class Outbox:
                 continue
             if response.get("code") == 409:
                 self.mark_conflict(item["msg_id"], response)
+            elif response.get("code") in PERMANENT_REJECTION_CODES:
+                # Retrying this command can never succeed, so park it instead
+                # of leaving it at the head of the queue forever.
+                self.mark_rejected(item["msg_id"], response)
             raise OutboxDeliveryError(item["msg_id"], response)
         return sent
 
@@ -138,10 +146,40 @@ class Outbox:
             raise KeyError(f"outbox pending command not found: {msg_id}")
         self.connection.commit()
 
+    def mark_rejected(self, msg_id: str, response: Dict[str, Any]) -> None:
+        cursor = self.connection.execute(
+            "UPDATE outbox SET state='REJECTED', last_error=? "
+            "WHERE msg_id=? AND state='PENDING'",
+            (
+                self._encode({"command_error": response}),
+                msg_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(f"outbox pending command not found: {msg_id}")
+        self.connection.commit()
+
     def conflicts(self) -> List[Dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT msg_id, uid, sequence, payload, attempts, last_error "
             "FROM outbox WHERE state='CONFLICT' ORDER BY rowid"
+        ).fetchall()
+        return [
+            {
+                "msg_id": row[0],
+                "uid": row[1],
+                "sequence": row[2],
+                "command": json.loads(row[3]),
+                "attempts": row[4],
+                "error": json.loads(row[5]) if row[5] else None,
+            }
+            for row in rows
+        ]
+
+    def rejected(self) -> List[Dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT msg_id, uid, sequence, payload, attempts, last_error "
+            "FROM outbox WHERE state='REJECTED' ORDER BY rowid"
         ).fetchall()
         return [
             {

@@ -160,3 +160,42 @@ def test_reconcile_rejects_noncontiguous_entries_without_server_cursor(tmp_path)
     with pytest.raises(ValueError, match="not contiguous"):
         outbox.reconcile([{"index": 2}])
     outbox.close()
+
+
+def test_permanently_rejected_command_is_parked_and_later_commands_continue(tmp_path):
+    outbox = Outbox(str(tmp_path / "outbox.db"))
+    rejected = command("01J00000000000000000000011")
+    later = command("01J00000000000000000000012")
+    later["uid"] = "alice:01J00000000000000000000002"
+    outbox.enqueue(rejected)
+    outbox.enqueue(later)
+    response = {"code": 422, "result": {"reason": "invalid_event"}}
+
+    def send(current):
+        if current["msg_id"] == rejected["msg_id"]:
+            return response
+        return {"code": 200, "deduplicated": False}
+
+    with pytest.raises(OutboxDeliveryError):
+        outbox.send_pending(send)
+
+    assert [item["msg_id"] for item in outbox.pending()] == [later["msg_id"]]
+    assert outbox.rejected()[0]["msg_id"] == rejected["msg_id"]
+    assert outbox.rejected()[0]["error"] == {"command_error": response}
+    assert outbox.send_pending(send) == 1
+    assert outbox.pending() == []
+    outbox.close()
+
+
+def test_retryable_status_keeps_the_command_pending(tmp_path):
+    outbox = Outbox(str(tmp_path / "outbox.db"))
+    pending = command()
+    outbox.enqueue(pending)
+    response = {"code": 503, "result": {"reason": "no leader"}}
+
+    with pytest.raises(OutboxDeliveryError):
+        outbox.send_pending(lambda _command: response)
+
+    assert [item["msg_id"] for item in outbox.pending()] == [pending["msg_id"]]
+    assert outbox.rejected() == []
+    outbox.close()
