@@ -236,9 +236,23 @@ def test_personal_privacy_controls_freebusy_without_hiding_organizer_conflicts()
     fsm.apply(event)
 
     result = fsm.availability(
-        ["alice", "bob"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "alice"
+        ["alice"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "alice"
     )
-    assert result["users"] == {"alice": "busy", "bob": "available"}
+    assert result["users"] == {"alice": "busy"}
+    # Sin un calendario compartido, otro usuario no ve ni siquiera el ocupado.
+    assert fsm.availability(
+        ["alice"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "bob"
+    )["users"] == {}
+
+    share = request(msg_id="01J00000000000000000000021", sequence=2)
+    share["type"] = "SHARE_CALENDAR"
+    share["payload"] = {
+        "calendar": "personal",
+        "users": ["bob"],
+        "permission": "freebusy",
+    }
+    assert fsm.apply(share)["code"] == 200
+
     external_result = fsm.availability(
         ["alice"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "bob"
     )
@@ -419,6 +433,35 @@ def test_custom_calendar_share_controls_event_visibility_and_edit_access():
     assert fsm.apply(private_edit)["code"] == 403
 
 
+def test_availability_only_reports_users_who_shared_their_calendar():
+    fsm = CalendarFSM()
+    for sender, msg_id in (("bob", "01J00000000000000000000051"), ("carol", "01J00000000000000000000052")):
+        event = request(msg_id=msg_id, sender=sender)
+        event["payload"] = {
+            "kind": "personal",
+            "start": "2026-11-21T10:00:00Z",
+            "end": "2026-11-21T11:00:00Z",
+        }
+        assert fsm.apply(event)["code"] == 200
+
+    share = request(msg_id="01J00000000000000000000053", sequence=2, sender="carol")
+    share["type"] = "SHARE_CALENDAR"
+    share["payload"] = {
+        "calendar": "work",
+        "users": ["alice"],
+        "permission": "details",
+    }
+    assert fsm.apply(share)["code"] == 200
+
+    result = fsm.availability(["alice", "bob", "carol"], None, None, "alice")
+
+    assert result["users"] == {"alice": "available", "carol": "busy"}
+    # Sin ``users`` explícitos tampoco se enumeran los usuarios sin compartir.
+    assert fsm.availability(None, None, None, "alice")["users"] == {
+        "carol": "busy",
+    }
+
+
 def test_personal_event_of_another_user_does_not_block_or_leak():
     fsm = CalendarFSM()
     alice_event = request()
@@ -431,12 +474,16 @@ def test_personal_event_of_another_user_does_not_block_or_leak():
     }
     assert fsm.apply(alice_event)["code"] == 200
 
-    # Alice sigue apareciendo como ocupada en las consultas de disponibilidad.
+    # Sin calendario compartido, Bob no ve la disponibilidad de Alice.
     assert fsm.availability(
         ["alice"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "bob"
+    )["users"] == {}
+    # Alice sí se ve ocupada a sí misma.
+    assert fsm.availability(
+        ["alice"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "alice"
     )["users"] == {"alice": "busy"}
 
-    # ...pero el evento personal de Alice no ocupa el calendario de Bob.
+    # ...y el evento personal de Alice no ocupa el calendario de Bob.
     assert fsm.availability(
         ["bob"], "2026-11-21T10:00:00Z", "2026-11-21T11:00:00Z", "bob"
     )["users"] == {"bob": "available"}

@@ -599,6 +599,12 @@ class CalendarFSM:
                 for user in [event["organizer"], *event["participants"]]
             }
         )
+        if viewer is not None:
+            # Free/busy is only exposed to the user itself and to users the
+            # owner shared a calendar with. Without this check any authenticated
+            # user could poll anyone's availability and the ``freebusy``
+            # permission would have no effect.
+            selected = [user for user in selected if self._can_view_freebusy(user, viewer)]
         result: Dict[str, str] = {}
         for user in selected:
             result[user] = (
@@ -899,6 +905,15 @@ class CalendarFSM:
         return self.attendance.get(event["uid"], {}).get(user) in (
             "ACCEPTED",
             "TENTATIVE",
+        )
+
+    def _can_view_freebusy(self, owner: str, viewer: str) -> bool:
+        if owner == viewer:
+            return True
+        return any(
+            viewer in share.get("users", [])
+            and share.get("permission") in ("freebusy", "details", "edit")
+            for share in self.calendar_shares.get(owner, {}).values()
         )
 
     def _can_view_command(self, command: Dict[str, Any], user_id: str) -> bool:

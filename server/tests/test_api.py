@@ -206,6 +206,26 @@ def test_reserved_system_identity_cannot_register(client):
     assert response.json()["detail"]["reason"] == "invalid_user_id"
 
 
+def test_availability_hides_users_without_a_share(client):
+    body = command("01J00000000000000000000061")
+    body["sender_id"] = "bob"
+    body["uid"] = "bob:01J00000000000000000000061"
+    body["payload"] = {
+        "kind": "personal",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+    }
+    assert client.post("/v1/commands", json=body, headers=headers("bob")).status_code == 200
+
+    window = "start=2026-11-21T10:00:00Z&end=2026-11-21T11:00:00Z"
+    other = client.get(f"/v1/availability?users=bob&{window}", headers=headers())
+    own = client.get(f"/v1/availability?users=bob&{window}", headers=headers("bob"))
+
+    assert other.status_code == 200
+    assert other.json()["users"] == {}
+    assert own.json()["users"] == {"bob": "busy"}
+
+
 def test_local_availability_timeout_returns_503(client, monkeypatch):
     def timeout(*args, **kwargs):
         raise TimeoutError("query timed out")
