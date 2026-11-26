@@ -1,5 +1,7 @@
 import random
 
+import pytest
+
 from server.ray_app.consensus.clock import FakeClock
 from server.ray_app.consensus.messages import AppendEntries, LogEntry, RequestVote
 from server.ray_app.consensus.node import RaftNode, Role
@@ -147,3 +149,40 @@ def test_status_reports_election_state():
     assert status["role"] == "leader"
     assert status["term"] == 1
     assert status["leader_id"] == "n0"
+
+
+class FailingStorage:
+    def load_meta(self):
+        return {}
+
+    def save_meta(self, *args, **kwargs):
+        pass
+
+    def load_log(self):
+        return []
+
+    def save_log(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    def save_snapshot(self, *args, **kwargs):
+        pass
+
+    def load_snapshot(self):
+        return None
+
+
+def test_failed_log_persistence_does_not_leave_a_phantom_entry():
+    node = RaftNode(
+        "n0",
+        [],
+        InMemoryNetwork(),
+        clock=FakeClock(),
+        storage=FailingStorage(),
+    )
+    node.start_election()
+    assert node.role is Role.LEADER
+
+    with pytest.raises(OSError, match="disk full"):
+        node.propose({"msg_id": "m1"})
+
+    assert node.log.last_index == 0

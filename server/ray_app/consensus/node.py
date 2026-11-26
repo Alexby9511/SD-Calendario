@@ -252,8 +252,10 @@ class RaftNode:
             term=self.current_term,
             command=command,
         )
-        self.log.append(entry)
+        # Persist before mutating the in-memory log: if the write fails, the
+        # entry never exists in memory and the replica does not drift from disk.
         self._persist_log([entry])
+        self.log.append(entry)
         self._replicate_all()
         self._advance_commit()
         if self.commit_index >= entry.index:
