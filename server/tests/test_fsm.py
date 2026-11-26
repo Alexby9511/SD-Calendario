@@ -64,6 +64,23 @@ def test_registered_accounts_are_replicated_in_snapshots():
     assert replayed.applied_index == fsm.applied_index
 
 
+def test_system_identity_cannot_be_registered():
+    fsm = CalendarFSM()
+    command = {
+        "internal_type": "REGISTER_ACCOUNT",
+        "user_id": "system",
+        "password_salt": "a" * 32,
+        "password_hash": "b" * 64,
+    }
+
+    result = fsm.apply(command)
+
+    assert result["code"] == 422
+    assert result["result"]["reason"] == "invalid_account"
+    assert "system" not in fsm.accounts
+    assert fsm.applied_index == 0
+
+
 def test_unordered_creation_does_not_consume_index():
     fsm = CalendarFSM()
     result = fsm.apply(request(sequence=2))

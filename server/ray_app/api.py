@@ -245,7 +245,7 @@ if app is not None:
         command: Dict[str, Any],
         user_id: str = Depends(authenticated_user),
     ):
-        if "internal_type" in command:
+        if "internal_type" in command or command.get("type") == "EVALUATE":
             raise HTTPException(
                 status_code=422, detail={"reason": "unsupported_command"}
             )

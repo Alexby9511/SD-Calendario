@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pkg.protocol.envelope import Envelope
+from pkg.protocol.envelope import RESERVED_USER_IDS, SYSTEM_USER_ID, Envelope
 
 MAX_SYNC_LIMIT = 1000
 _OWNER_ONLY_EVENT_FIELDS = ("visibility", "availability", "privacy", "hide_from_freebusy")
@@ -151,6 +151,7 @@ class CalendarFSM:
         password_hash = command.get("password_hash")
         if (
             not isinstance(user_id, str)
+            or user_id in RESERVED_USER_IDS
             or re.fullmatch(r"[a-z0-9][a-z0-9_.-]{2,31}", user_id) is None
             or not isinstance(password_salt, str)
             or re.fullmatch(r"[0-9a-f]{32}", password_salt) is None
@@ -388,7 +389,7 @@ class CalendarFSM:
         }
 
     def _evaluate(self, envelope: Envelope) -> Dict[str, Any]:
-        if envelope.sender_id != "system":
+        if envelope.sender_id != SYSTEM_USER_ID:
             return {"code": 403, "reason": "system_command_only"}
         now = self._parse_datetime(envelope.payload.get("now"))
         if now is None:

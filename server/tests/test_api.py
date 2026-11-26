@@ -158,6 +158,28 @@ def test_calendar_commands_cannot_submit_internal_account_operations(client):
     assert response.json()["detail"]["reason"] == "unsupported_command"
 
 
+def test_calendar_commands_cannot_submit_system_evaluation(client):
+    body = command("01J00000000000000000000031")
+    body["type"] = "EVALUATE"
+    body["uid"] = "system:calendar"
+    body["payload"] = {"now": "2030-01-01T00:00:00Z"}
+
+    response = client.post("/v1/commands", json=body, headers=headers())
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "unsupported_command"
+
+
+def test_reserved_system_identity_cannot_register(client):
+    response = client.post(
+        "/v1/auth/register",
+        json={"user_id": "System", "password": "secure password"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "invalid_user_id"
+
+
 def test_local_availability_timeout_returns_503(client, monkeypatch):
     def timeout(*args, **kwargs):
         raise TimeoutError("query timed out")

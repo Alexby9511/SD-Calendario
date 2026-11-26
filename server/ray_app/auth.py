@@ -10,6 +10,8 @@ import secrets
 import time
 from typing import Dict, Iterable
 
+from pkg.protocol.envelope import RESERVED_USER_IDS
+
 USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,31}$")
 PASSWORD_ITERATIONS = 310_000
 TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
@@ -78,6 +80,8 @@ def normalize_user_id(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("invalid_user_id")
     normalized = value.strip().lower()
+    if normalized in RESERVED_USER_IDS:
+        raise ValueError("invalid_user_id")
     if not USERNAME_PATTERN.fullmatch(normalized):
         raise ValueError("invalid_user_id")
     return normalized

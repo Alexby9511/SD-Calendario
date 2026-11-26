@@ -13,6 +13,12 @@ VALID_TYPES = {
     "CLOSE_POLL", "REOPEN", "REANCHOR", "BUSY_UPDATE", "SHARE_CALENDAR", "EVALUATE",
 }
 
+# Identity used by the leader ticker for internal expiration commands. Clients
+# must never be able to register it or submit EVALUATE commands: both are
+# rejected by the API and the state machine.
+SYSTEM_USER_ID = "system"
+RESERVED_USER_IDS = frozenset({SYSTEM_USER_ID})
+
 MAX_SEQUENCE = 2**63 - 1
 
 
