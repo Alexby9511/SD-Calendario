@@ -699,6 +699,19 @@ class CalendarFSM:
             # or a snapshot restore). Incremental entries alone cannot rebuild
             # the client state, so force the snapshot.
             include_snapshot = True
+        if not include_snapshot and any(
+            item["command"].get("type") == "EVALUATE"
+            and any(
+                uid in self.events
+                and self._can_view_event(self.events[uid], user_id)
+                for uid in item["result"].get("expired", [])
+            )
+            for item in page["entries"]
+        ):
+            # An EVALUATE has no event of its own, so it is dropped from the
+            # incremental page. The snapshot is what tells the client which
+            # visible events moved to EXPIRED.
+            include_snapshot = True
         visible_entries = []
         for item in page["entries"]:
             if not self._can_view_command(item["command"], user_id):

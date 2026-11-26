@@ -659,6 +659,33 @@ def test_sync_for_forces_a_snapshot_when_the_cursor_fell_out_of_history(monkeypa
     assert "snapshot" not in page
 
 
+def test_sync_for_includes_a_snapshot_when_an_evaluation_expires_a_visible_event():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob"],
+    }
+    assert fsm.apply(proposal)["code"] == 200
+
+    evaluation = request(msg_id="01J00000000000000000000031", sender="system")
+    evaluation["type"] = "EVALUATE"
+    evaluation["payload"] = {"now": "2026-11-21T12:00:00Z"}
+    result = fsm.apply(evaluation)
+    assert result["result"]["expired"] == [proposal["uid"]]
+
+    page = fsm.sync_for("alice", 0, 100, include_snapshot=False)
+    assert "snapshot" in page
+    assert page["snapshot"]["events"][proposal["uid"]]["state"] == "EXPIRED"
+
+    # An evaluation that only touches other users' events does not force a
+    # snapshot for this client.
+    page = fsm.sync_for("carol", 0, 100, include_snapshot=False)
+    assert "snapshot" not in page
+
+
 def test_equal_busy_publication_sequence_is_ignored():
     fsm = CalendarFSM()
     first = request()
