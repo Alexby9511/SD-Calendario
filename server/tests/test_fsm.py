@@ -2,6 +2,7 @@ import copy
 
 import pytest
 
+from server.ray_app import fsm as fsm_module
 from server.ray_app.fsm import CalendarFSM
 from server.ray_app.state import CalendarState
 
@@ -616,6 +617,46 @@ def test_sync_redacts_busy_updates_but_advances_past_their_log_indexes():
     assert page == {"entries": [], "next": 1, "as_of": 2}
     page = fsm.sync(page["next"], limit=1)
     assert [entry["index"] for entry in page["entries"]] == [2]
+
+
+def test_history_and_seen_are_bounded(monkeypatch):
+    monkeypatch.setattr(fsm_module, "MAX_HISTORY_ENTRIES", 3)
+    monkeypatch.setattr(fsm_module, "MAX_SEEN_PER_SENDER", 2)
+    fsm = CalendarFSM()
+    for n in range(5):
+        event = request(
+            msg_id=f"01J0000000000000000000000{n}",
+            uid=f"alice:01J0000000000000000000010{n}",
+        )
+        assert fsm.apply(event)["code"] == 200
+
+    assert [entry["index"] for entry in fsm.log] == [3, 4, 5]
+    assert list(fsm.seen["alice"]) == [
+        "01J00000000000000000000003",
+        "01J00000000000000000000004",
+    ]
+    snapshot = fsm.snapshot()
+    assert "log" not in snapshot
+    assert CalendarFSM.from_snapshot(snapshot).log == []
+
+
+def test_sync_for_forces_a_snapshot_when_the_cursor_fell_out_of_history(monkeypatch):
+    monkeypatch.setattr(fsm_module, "MAX_HISTORY_ENTRIES", 2)
+    fsm = CalendarFSM()
+    for n in range(4):
+        event = request(
+            msg_id=f"01J0000000000000000000001{n}",
+            uid=f"alice:01J0000000000000000000020{n}",
+        )
+        assert fsm.apply(event)["code"] == 200
+
+    page = fsm.sync_for("alice", 0, 100, include_snapshot=False)
+    assert [entry["index"] for entry in page["entries"]] == [3, 4]
+    assert page["next"] == 4
+    assert "snapshot" in page
+
+    page = fsm.sync_for("alice", 2, 100, include_snapshot=False)
+    assert "snapshot" not in page
 
 
 def test_equal_busy_publication_sequence_is_ignored():

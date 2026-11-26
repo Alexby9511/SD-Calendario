@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional
 from pkg.protocol.envelope import RESERVED_USER_IDS, SYSTEM_USER_ID, Envelope
 
 MAX_SYNC_LIMIT = 1000
+# The state machine keeps only a bounded window of applied commands for sync
+# and dedupe. Snapshots no longer carry the whole history, so a long-lived
+# cluster does not rewrite every command on each snapshot.
+MAX_HISTORY_ENTRIES = 10_000
+MAX_SEEN_PER_SENDER = 1_000
 _OWNER_ONLY_EVENT_FIELDS = ("visibility", "availability", "privacy", "hide_from_freebusy")
 
 
@@ -126,11 +131,15 @@ class CalendarFSM:
             }
 
         self.applied_index += 1
-        self.seen.setdefault(envelope.sender_id, {})[msg_id] = {
+        sender_seen = self.seen.setdefault(envelope.sender_id, {})
+        sender_seen[msg_id] = {
             "applied_index": self.applied_index,
             "result": copy.deepcopy(result),
         }
-        self.log.append(
+        if len(sender_seen) > MAX_SEEN_PER_SENDER:
+            for stale in list(sender_seen)[: len(sender_seen) - MAX_SEEN_PER_SENDER]:
+                del sender_seen[stale]
+        self._append_history(
             {
                 "index": self.applied_index,
                 "msg_id": msg_id,
@@ -144,6 +153,12 @@ class CalendarFSM:
             "applied_index": self.applied_index,
             "result": result,
         }
+
+    def _append_history(self, entry: Dict[str, Any]) -> None:
+        self.log.append(entry)
+        overflow = len(self.log) - MAX_HISTORY_ENTRIES
+        if overflow > 0:
+            del self.log[:overflow]
 
     def _register_account(self, command: Dict[str, Any]) -> Dict[str, Any]:
         user_id = command.get("user_id")
@@ -178,7 +193,7 @@ class CalendarFSM:
         }
         self.applied_index += 1
         result = {"ok": True, "user_id": user_id}
-        self.log.append(
+        self._append_history(
             {
                 "index": self.applied_index,
                 "msg_id": f"register:{user_id}",
@@ -679,6 +694,11 @@ class CalendarFSM:
         include_snapshot: bool = True,
     ) -> Dict[str, Any]:
         page = self.sync(since, limit)
+        if self.log and since < self.log[0]["index"] - 1:
+            # The cursor points before the retained history (a trimmed window
+            # or a snapshot restore). Incremental entries alone cannot rebuild
+            # the client state, so force the snapshot.
+            include_snapshot = True
         visible_entries = []
         for item in page["entries"]:
             if not self._can_view_command(item["command"], user_id):
@@ -961,7 +981,13 @@ class CalendarFSM:
             if owner == user_id or user_id in share["users"]
         ]
 
-    def snapshot(self, include_log: bool = True) -> Dict[str, Any]:
+    def snapshot(self, include_log: bool = False) -> Dict[str, Any]:
+        """Serialize the state machine for replication.
+
+        The sync history is intentionally excluded: it is bounded and
+        disposable, and including it made every snapshot O(total commands).
+        ``from_snapshot`` still accepts older snapshots that carry ``log``.
+        """
         snapshot = {
             "accounts": copy.deepcopy(self.accounts),
             "events": copy.deepcopy(self.events),
