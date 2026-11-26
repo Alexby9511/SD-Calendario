@@ -21,6 +21,52 @@ const EVENTS_KEY = "sd-calendar-events";
 const SHARES_KEY = "sd-calendar-shares";
 const SESSION_KEY = "sd-calendar-session";
 
+function isStoredEvent(value: unknown): value is GroupEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const event = value as Partial<GroupEvent>;
+  return (
+    typeof event.uid === "string" &&
+    typeof event.organizer === "string" &&
+    typeof event.kind === "string" &&
+    Array.isArray(event.participants) &&
+    typeof event.payload === "object" &&
+    event.payload !== null
+  );
+}
+
+function loadStoredEvents(user: string): GroupEvent[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(`${EVENTS_KEY}:${user}`) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter(isStoredEvent) : [];
+  } catch {
+    // A corrupt value must not white-screen the app; drop it and start fresh.
+    return [];
+  }
+}
+
+function isStoredShare(value: unknown): value is CalendarShare {
+  if (typeof value !== "object" || value === null) return false;
+  const share = value as Partial<CalendarShare>;
+  return (
+    typeof share.owner === "string" &&
+    typeof share.calendar === "string" &&
+    Array.isArray(share.users) &&
+    share.users.every((candidate) => typeof candidate === "string") &&
+    (share.permission === "freebusy" ||
+      share.permission === "details" ||
+      share.permission === "edit")
+  );
+}
+
+function loadStoredShares(user: string): CalendarShare[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(`${SHARES_KEY}:${user}`) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter(isStoredShare) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [session, setSession] = useState<AuthSession | null>(() => {
     try {
@@ -108,21 +154,8 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
   const [personalVisible, setPersonalVisible] = useState(true);
   const [groupVisible, setGroupVisible] = useState(true);
   const [availabilityMap, setAvailabilityMap] = useState<Record<string, "busy" | "available">>({});
-  const [events, setEvents] = useState<GroupEvent[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem(`${EVENTS_KEY}:${user}`) ?? "[]");
-    } catch {
-      return [];
-    }
-  });
-  const [calendarShares, setCalendarShares] = useState<CalendarShare[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(`${SHARES_KEY}:${user}`) ?? "[]");
-      return Array.isArray(saved) ? saved : [];
-    } catch {
-      return [];
-    }
-  });
+  const [events, setEvents] = useState<GroupEvent[]>(() => loadStoredEvents(user));
+  const [calendarShares, setCalendarShares] = useState<CalendarShare[]>(() => loadStoredShares(user));
   const [customCalendars, setCustomCalendars] = useState<CustomCalendar[]>(() => loadCustomCalendars(user));
   const [outbox, setOutbox] = useState(getOutbox());
   const [cursor, setCursor] = useState(() => getCursor(deployment, user));
