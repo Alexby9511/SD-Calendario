@@ -430,7 +430,12 @@ class RaftNode:
             ),
             None,
         )
-        if not self.log.append_entries(
+        # Build the post-append log off to the side and persist it before
+        # swapping it in: if the write fails, memory must not run ahead of disk.
+        candidate = RaftLog(
+            self.log.entries, self.log.snapshot_index, self.log.snapshot_term
+        )
+        if not candidate.append_entries(
             message.prev_log_index, message.prev_log_term, message.entries
         ):
             return AppendEntriesResponse(self.current_term, False)
@@ -439,8 +444,9 @@ class RaftNode:
                 self._persist_log(message.entries)
             else:
                 self._persist_log(
-                    self.log.slice(replace_from), truncate_from=replace_from
+                    candidate.slice(replace_from), truncate_from=replace_from
                 )
+            self.log = candidate
 
         if message.leader_commit > self.commit_index:
             self.commit_index = min(message.leader_commit, self.log.last_index)

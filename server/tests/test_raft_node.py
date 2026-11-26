@@ -186,3 +186,51 @@ def test_failed_log_persistence_does_not_leave_a_phantom_entry():
         node.propose({"msg_id": "m1"})
 
     assert node.log.last_index == 0
+
+
+def test_failed_replication_persistence_does_not_mutate_the_follower_log():
+    node = RaftNode(
+        "n0",
+        [],
+        InMemoryNetwork(),
+        clock=FakeClock(),
+        storage=FailingStorage(),
+    )
+    message = AppendEntries(
+        term=1,
+        leader_id="n1",
+        prev_log_index=0,
+        prev_log_term=0,
+        entries=[LogEntry(index=1, term=1, command={"msg_id": "m1"})],
+        leader_commit=0,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        node.handle_append_entries(message)
+
+    assert node.log.last_index == 0
+    assert node.commit_index == 0
+
+
+def test_failed_replication_persistence_keeps_the_previous_suffix():
+    node = RaftNode(
+        "n0",
+        [],
+        InMemoryNetwork(),
+        clock=FakeClock(),
+        storage=FailingStorage(),
+    )
+    node.log.append(LogEntry(index=1, term=1, command={"msg_id": "old"}))
+    message = AppendEntries(
+        term=2,
+        leader_id="n1",
+        prev_log_index=0,
+        prev_log_term=0,
+        entries=[LogEntry(index=1, term=2, command={"msg_id": "new"})],
+        leader_commit=0,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        node.handle_append_entries(message)
+
+    assert [entry.command["msg_id"] for entry in node.log.entries] == ["old"]
