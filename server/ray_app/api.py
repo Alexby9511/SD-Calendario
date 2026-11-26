@@ -136,6 +136,11 @@ def _query_timeout(exc: Exception) -> HTTPException:
     )
 
 
+def _unavailable(exc: Exception) -> HTTPException:
+    """Map a missing leader or an unreachable replica to 503, not 500."""
+    return HTTPException(status_code=503, detail={"reason": str(exc)})
+
+
 app = FastAPI(title="SD Calendario sobre Ray") if FastAPI is not None else None
 
 
@@ -318,11 +323,16 @@ if app is not None:
     @app.get("/v1/kv/{key}")
     def kv(key: str, user_id: str = Depends(authenticated_user)):
         cluster = get_cluster()
-        snapshot = (
-            cluster.snapshot()
-            if cluster is not None
-            else resolve(call_coordinator("snapshot"))
-        )
+        try:
+            snapshot = (
+                cluster.snapshot()
+                if cluster is not None
+                else resolve(call_coordinator("snapshot"))
+            )
+        except NoLeaderError as exc:
+            raise _unavailable(exc) from exc
+        except _QUERY_TIMEOUT_ERRORS as exc:
+            raise _query_timeout(exc) from exc
         visible = _visible_snapshot(snapshot, user_id)
         if key == "*":
             return visible
@@ -340,16 +350,9 @@ if app is not None:
     ):
         selected = [user for user in users.split(",") if user] if users else [user_id]
         cluster = get_cluster()
-        if cluster is not None:
-            try:
-                return cluster.availability(selected, start, end, user_id)
-            except _QUERY_TIMEOUT_ERRORS as exc:
-                raise _query_timeout(exc) from exc
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=422, detail={"reason": str(exc)}
-                ) from exc
         try:
+            if cluster is not None:
+                return cluster.availability(selected, start, end, user_id)
             return resolve(
                 call_coordinator("availability", selected, start, end, user_id)
             )
@@ -357,6 +360,8 @@ if app is not None:
             raise HTTPException(
                 status_code=422, detail={"reason": str(exc)}
             ) from exc
+        except NoLeaderError as exc:
+            raise _unavailable(exc) from exc
         except _QUERY_TIMEOUT_ERRORS as exc:
             raise _query_timeout(exc) from exc
 
@@ -373,21 +378,18 @@ if app is not None:
                 status_code=403, detail={"reason": "conflicts_are_self_only"}
             )
         cluster = get_cluster()
-        if cluster is not None:
-            try:
-                return cluster.conflicts(user, start, end, exclude_uid)
-            except _QUERY_TIMEOUT_ERRORS as exc:
-                raise _query_timeout(exc) from exc
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=422, detail={"reason": str(exc)}
-                ) from exc
         try:
-            return resolve(call_coordinator("conflicts", user, start, end, exclude_uid))
+            if cluster is not None:
+                return cluster.conflicts(user, start, end, exclude_uid)
+            return resolve(
+                call_coordinator("conflicts", user, start, end, exclude_uid)
+            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=422, detail={"reason": str(exc)}
             ) from exc
+        except NoLeaderError as exc:
+            raise _unavailable(exc) from exc
         except _QUERY_TIMEOUT_ERRORS as exc:
             raise _query_timeout(exc) from exc
 
@@ -399,21 +401,20 @@ if app is not None:
         user_id: str = Depends(authenticated_user),
     ):
         cluster = get_cluster()
-        if cluster is not None:
-            try:
-                return cluster.sync(since, limit, user_id, include_snapshot)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=422, detail={"reason": str(exc)}
-                ) from exc
         try:
+            if cluster is not None:
+                return cluster.sync(since, limit, user_id, include_snapshot)
             return resolve(
-                call_coordinator(
-                    "sync", since, limit, user_id, include_snapshot
-                )
+                call_coordinator("sync", since, limit, user_id, include_snapshot)
             )
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail={"reason": str(exc)}) from exc
+            raise HTTPException(
+                status_code=422, detail={"reason": str(exc)}
+            ) from exc
+        except NoLeaderError as exc:
+            raise _unavailable(exc) from exc
+        except _QUERY_TIMEOUT_ERRORS as exc:
+            raise _query_timeout(exc) from exc
 
     @app.get("/health")
     def health():

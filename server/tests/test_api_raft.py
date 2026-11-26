@@ -47,6 +47,8 @@ class FakeCluster:
         }
 
     def snapshot(self):
+        if self.error is not None:
+            raise self.error
         return {
             "events": {
                 "alice:01J00000000000000000000001": {
@@ -94,6 +96,8 @@ class FakeCluster:
         return {"user": user, "conflicts": [], "as_of": 1}
 
     def sync(self, since=0, limit=100, user_id=None, include_snapshot=True):
+        if self.error is not None:
+            raise self.error
         return {"entries": [], "next": since, "as_of": 1}
 
 
@@ -267,6 +271,24 @@ def test_ray_get_timeout_returns_503(client):
 
     assert response.status_code == 503
     assert response.json()["detail"]["reason"] == "query_timeout"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/kv/*",
+        "/v1/sync",
+        "/v1/availability?users=alice",
+        "/v1/conflicts?user=alice&start=2026-11-21T09:00:00Z&end=2026-11-21T10:00:00Z",
+    ],
+)
+def test_reads_without_a_leader_return_503(client, path):
+    api.set_cluster(FakeCluster(error=NoLeaderError("raft: no leader available")))
+
+    response = client.get(path, headers=headers())
+
+    assert response.status_code == 503
+    assert "no leader" in response.json()["detail"]["reason"]
 
 
 def test_sync_rejects_limits_over_one_thousand(client):
