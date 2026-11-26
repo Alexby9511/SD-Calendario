@@ -36,7 +36,7 @@ def _encode(value: Any) -> str:
     return json.dumps(
         value,
         sort_keys=True,
-        ensure_ascii=False,
+        ensure_ascii=True,
         separators=(",", ":"),
     )
 

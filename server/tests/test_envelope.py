@@ -68,3 +68,27 @@ def test_missing_sequence_is_still_a_protocol_error():
 
     with pytest.raises(KeyError):
         Envelope.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["deployment_id", "group_id", "msg_id", "uid", "key_id", "client_sent_at"],
+)
+def test_lone_surrogates_in_envelope_fields_are_rejected(field):
+    # json.loads accepts "\ud800", but neither SQLite nor canonical_bytes can
+    # encode it. It must fail validation, not halfway through the log write.
+    parsed = json.loads(json.dumps({"value": "\ud800"}))["value"]
+
+    with pytest.raises(ValueError):
+        Envelope.from_dict(envelope(**{field: parsed})).validate()
+
+
+def test_lone_surrogate_in_payload_is_rejected():
+    parsed = json.loads(json.dumps({"value": "\ud800"}))["value"]
+
+    with pytest.raises(ValueError):
+        Envelope.from_dict(envelope(payload={"title": parsed})).validate()
+
+
+def test_non_ascii_payload_still_validates():
+    Envelope.from_dict(envelope(payload={"title": "Diseño"})).validate()

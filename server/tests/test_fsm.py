@@ -3,6 +3,7 @@ import copy
 import pytest
 
 from server.ray_app.fsm import CalendarFSM
+from server.ray_app.state import CalendarState
 
 
 def request(msg_id="01J00000000000000000000000", sequence=1, sender="alice", uid=None):
@@ -62,6 +63,18 @@ def test_registered_accounts_are_replicated_in_snapshots():
     }
     assert replayed.apply({**command, "password_hash": "c" * 64})["code"] == 409
     assert replayed.applied_index == fsm.applied_index
+
+
+def test_lone_surrogate_command_is_rejected_without_touching_the_log():
+    state = CalendarState()
+    command = request()
+    command["group_id"] = "\ud800"
+
+    result = state.apply(command)
+
+    assert result["code"] == 422
+    assert state.fsm.applied_index == 0
+    assert state.fsm.log == []
 
 
 def test_system_identity_cannot_be_registered():

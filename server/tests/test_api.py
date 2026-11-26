@@ -170,6 +170,32 @@ def test_calendar_commands_cannot_submit_system_evaluation(client):
     assert response.json()["detail"]["reason"] == "unsupported_command"
 
 
+def test_lone_surrogate_command_is_rejected_instead_of_crashing_the_service(client):
+    body = (
+        '{"deployment_id":"dep1","group_id":"\\ud800",'
+        '"msg_id":"01J00000000000000000000041","type":"REQUEST",'
+        '"uid":"alice:01J00000000000000000000042","sender_id":"alice",'
+        '"key_id":"key1","sequence":1,"seen_sequence":0,'
+        '"client_sent_at":"2026-11-20T00:00:00Z","payload":{"title":"Prueba"}}'
+    )
+
+    response = client.post(
+        "/v1/commands",
+        content=body,
+        headers={**headers(), "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == 422
+
+    ok = client.post(
+        "/v1/commands",
+        json=command("01J00000000000000000000043"),
+        headers=headers(),
+    )
+    assert ok.status_code == 200
+
+
 def test_reserved_system_identity_cannot_register(client):
     response = client.post(
         "/v1/auth/register",

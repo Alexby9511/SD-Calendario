@@ -39,6 +39,22 @@ def _sequence_value(data: Mapping[str, Any], name: str) -> int:
     return value
 
 
+def _require_utf8(values: Dict[str, Any]) -> None:
+    """Reject strings that cannot be encoded as UTF-8.
+
+    A lone surrogate such as ``\\ud800`` parses as JSON and survives in memory,
+    but SQLite and ``canonical_bytes`` cannot encode it. Rejecting it here keeps
+    the replicated log total instead of failing halfway through a write.
+    """
+    for name, value in values.items():
+        if not isinstance(value, str):
+            continue
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"protocol: {name} must be valid UTF-8") from exc
+
+
 @dataclass
 class Envelope:
     deployment_id: str
@@ -105,6 +121,18 @@ class Envelope:
         for name in ("deployment_id", "group_id", "msg_id", "uid", "sender_id"):
             if not str(getattr(self, name)).strip():
                 raise ValueError(f"protocol: empty {name}")
+        _require_utf8(
+            {
+                "deployment_id": self.deployment_id,
+                "group_id": self.group_id,
+                "msg_id": self.msg_id,
+                "uid": self.uid,
+                "sender_id": self.sender_id,
+                "key_id": self.key_id,
+                "client_sent_at": self.client_sent_at,
+                "signature": self.signature,
+            }
+        )
         if self.type not in VALID_TYPES:
             raise ValueError(f"protocol: unknown type {self.type!r}")
         if self.type != "EVALUATE" and not self.key_id.strip():
@@ -114,7 +142,10 @@ class Envelope:
         if self.type == "REQUEST" and self.sequence == 1:
             if not self.uid.startswith(self.sender_id + ":"):
                 raise ValueError("protocol: uid outside sender namespace")
-        canonical_bytes(self.payload)
+        try:
+            canonical_bytes(self.payload)
+        except UnicodeEncodeError as exc:
+            raise ValueError("protocol: payload must be valid UTF-8") from exc
 
     def message_hash(self) -> str:
         return sha256(self.signing_input()).hexdigest()

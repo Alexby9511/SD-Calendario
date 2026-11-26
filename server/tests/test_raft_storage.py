@@ -201,3 +201,11 @@ def test_single_node_elects_itself_and_persists(tmp_path):
         assert restarted.voted_for == "n0"
     finally:
         storage.close()
+
+
+def test_save_log_round_trips_non_ascii_commands(tmp_path):
+    command = {"msg_id": "m1", "title": "Diseño"}
+    with SQLiteStorage(tmp_path / "raft.db") as storage:
+        storage.save_log([LogEntry(index=1, term=1, command=command)])
+
+        assert storage.load_log() == [LogEntry(index=1, term=1, command=command)]
