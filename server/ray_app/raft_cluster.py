@@ -109,8 +109,14 @@ class RaftCluster:
             if leader_id is None:
                 raise NoLeaderError("raft: no leader available")
             try:
+                actor = self.actor(leader_id)
+            except ValueError as exc:
+                # Named actor lookup raises ValueError when the replica is gone.
+                last_error = exc
+                continue
+            try:
                 return ray.get(
-                    self.actor(leader_id).propose.remote(command),
+                    actor.propose.remote(command),
                     timeout=self.timeout,
                 )
             except (NotLeaderError, TransportError) + _RAY_ERRORS as exc:
