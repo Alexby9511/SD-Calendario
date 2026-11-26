@@ -1,108 +1,264 @@
-# SD Calendario — prototipo distribuido sobre Ray
+# SD Calendario — despliegue distribuido sobre Ray
 
 Calendario compartido para eventos personales, invitaciones, aceptación,
 rechazo, disponibilidad, conflictos y reconciliación offline.
 
-El estado autoritativo se replica con Raft en actores de Ray. El cliente
-prototipo conserva comandos pendientes en una outbox SQLite para reintentar
-la sincronización después de una desconexión.
+El estado autoritativo se replica con Raft en actores de Ray. La API es
+FastAPI y la interfaz web es React. Este README explica cómo levantar el
+despliegue de referencia completo con Docker en una sola computadora.
 
-## Stack
+## Arquitectura del despliegue
 
-| Capa | Tecnología |
+El despliegue de referencia levanta **9 contenedores en una misma máquina
+Docker**:
+
+| Contenedor | Función |
 | --- | --- |
-| Servidor | Python + Ray |
-| API | FastAPI |
-| Protocolo | JCS/RFC 8785 |
-| Identidad API | Registro de usuario/contraseña y tokens Bearer |
-| Estado | FSM determinista replicada por cinco actores Raft |
-| Cliente prototipo | Python + SQLite outbox |
-| Despliegue | Dockerfiles individuales + `docker run` |
+| `ray-head` | Coordinador de Ray, Ray Client en `10001`, dashboard en `8265` y volumen `sdcal-gcs-data` |
+| `ray-worker-1` … `ray-worker-5` | Una réplica Raft por worker, con su SQLite en `sdcal-data-N` |
+| `sdcal-api-1` … `sdcal-api-3` | APIs FastAPI sin estado en `8081`, `8082` y `8083` |
 
-Requisitos: Python 3.10+, Docker opcional y Ray 2.60+.
+Hay **5 réplicas Raft**, una por worker, con **quórum 3/5**. El líder es la
+única autoridad de escritura; los seguidores replican el log y aplican la misma
+FSM. Las APIs son intercambiables: todas se conectan al Ray Client del head y
+envían las escrituras al líder.
 
-Al abrir la aplicación se muestra el registro o inicio de sesión; no se puede
-usar el calendario sin una sesión válida. Cada usuario elige un identificador
-único (3–32 caracteres) y una contraseña de al menos 8 caracteres. Las cuentas
-y sus hashes se guardan en el estado replicado por Raft. Configura una clave
-secreta compartida por todas las APIs fuera del repositorio:
+Ray solo aporta el runtime distribuido. El consenso Raft está implementado en
+`server/ray_app/consensus/` y no depende de frameworks externos.
 
-```bash
-export SDCAL_AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-```
+Puntos importantes:
 
-Las rutas de datos requieren un token Bearer emitido tras iniciar sesión. La
-configuración antigua `SDCAL_API_TOKENS` se mantiene opcionalmente para clientes
-heredados; esos tokens no habilitan el registro de cuentas.
+- El despliegue es distribuido **en contenedores**, pero todo corre en la misma
+  computadora. No es un despliegue multi-host.
+- El head de Ray es un **SPOF aceptado**: si cae, el clúster deja de coordinar.
+- Cada réplica persiste término, voto, log y snapshot en su SQLite local.
+- Los volúmenes `sdcal-data-1` … `sdcal-data-5` y `sdcal-gcs-data` conservan el
+  estado entre reinicios de contenedores.
 
-La identidad autorizada procede exclusivamente del token Bearer. Aunque el
-protocolo transporta `key_id` y `signature` y `Envelope.verify()` está
-disponible para uso explícito, la admisión actual no verifica firmas Ed25519 ni
-exige que `key_id` corresponda a `sender_id`; esos campos no autentican ni
-autorizan comandos. No uses este prototipo como sustituto de esa verificación
-en un despliegue que dependa de firmas de dispositivo.
+## Requisitos
 
-`visibility` admite solo `private` y `public`. La disponibilidad responde solo
-`available` o `busy`; una ruta privada muestra sus detalles únicamente al
-organizador y a los participantes. `/health` comprueba el proceso y `/ready`
-comprueba autenticación, líder y quórum.
+- Docker Engine + CLI, con permiso para ejecutar Docker sin `sudo`.
+- Git.
+- Node.js 18+ solo si vas a usar la interfaz web.
+- Puertos libres: `8081`, `8082`, `8083`, `6379` y `8265`.
+- Conexión a Internet para el primer build de las imágenes, salvo que
+  `deploy/wheelhouse/` contenga las wheels necesarias.
+- Varios GB de RAM disponibles. No es un despliegue ligero.
 
-## Ejecutar localmente
+No hace falta crear un entorno virtual de Python ni instalar las dependencias
+en el host para este despliegue: las imágenes Docker ya incluyen la aplicación.
 
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[test]"
-pytest
-SDCAL_AUTH_SECRET='<secreto-compartido-de-al-menos-32-bytes>' \
-  python -m server.cmd.sdcald --no-ray --port 8080
-```
+## Secretos
 
-Con Ray en el equipo:
+Para levantar el clúster solo necesitas el secreto de autenticación:
 
 ```bash
-SDCAL_AUTH_SECRET='<secreto-compartido-de-al-menos-32-bytes>' \
-  python -m server.cmd.sdcald --port 8080
+export SDCAL_AUTH_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 ```
 
-## API
+`SDCAL_AUTH_SECRET`:
 
-- `POST /v1/commands`
-- `POST /v1/command` — compatibilidad con el hito anterior
+- debe tener al menos 32 bytes;
+- debe ser el mismo en las tres APIs;
+- debe conservarse entre reinicios. Si cambia, los tokens Bearer ya emitidos
+  dejan de ser válidos.
+
+No escribas este secreto en el repositorio.
+
+La demo y los clientes heredados usan además un token Bearer estático:
+
+```bash
+export SDCAL_DEMO_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export SDCAL_API_TOKENS="$(python3 -c 'import json,os; print(json.dumps({"alice": os.environ["SDCAL_DEMO_TOKEN"]}))')"
+```
+
+`SDCAL_API_TOKENS` es el mecanismo legado. No hace falta para levantar el
+clúster ni para usar la interfaz web; solo se usa en la demo y en scripts de
+verificación o caos.
+
+## Levantar el clúster desde cero
+
+```bash
+git clone <url-del-repositorio> "SD Calendario"
+cd "SD Calendario"
+
+export SDCAL_AUTH_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
+./deploy/up.sh
+```
+
+`up.sh` hace lo siguiente:
+
+1. Crea la red Docker `sdcal`.
+2. Construye las imágenes `sdcal-ray:local-head`, `sdcal-ray:local-worker` y
+   `sdcal-ray:local-api`.
+3. Levanta `ray-head`.
+4. Levanta los 5 workers.
+5. Levanta las 3 APIs en `8081`, `8082` y `8083`.
+6. Espera a que `/ready` responda en las tres APIs.
+
+Si las imágenes ya están construidas, puedes reutilizarlas:
+
+```bash
+SDCAL_SKIP_BUILD=1 ./deploy/up.sh
+```
+
+`up.sh` elimina y recrea los contenedores de una ejecución anterior, pero
+**conserva los volúmenes**. Para borrar también los datos hay que usar
+`down.sh`.
+
+No uses `demo.sh` para dejar el clúster levantado: es una prueba temporal que
+borra todo al terminar. Su comportamiento se explica más abajo.
+
+## Verificar que está funcionando
+
+```bash
+curl -fsS http://localhost:8081/health
+curl -fsS http://localhost:8081/ready
+```
+
+`/health` comprueba que el proceso responde. `/ready` exige autenticación
+configurada, líder y quórum; si falta alguno, devuelve `503`.
+
+Para obtener un token sin usar la interfaz web:
+
+```bash
+curl -fsS -X POST http://localhost:8081/v1/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"alice","password":"password123"}'
+```
+
+La respuesta incluye `access_token`. Úsalo para consultar el estado:
+
+```bash
+curl -fsS -H "Authorization: Bearer <access_token>" \
+  http://localhost:8081/v1/status
+```
+
+El estado debe mostrar:
+
+- `middleware: "ray"`;
+- `alive_replicas: 5`;
+- `quorum_available: true`;
+- un `leader_id` válido.
+
+Las tres APIs son equivalentes; puedes repetir la comprobación contra `8082` y
+`8083`.
+
+### Rutas principales
+
 - `POST /v1/auth/register`
 - `POST /v1/auth/login`
 - `GET /v1/auth/me`
+- `POST /v1/commands` (alias `POST /v1/command`)
 - `GET /v1/status`
-- `GET /v1/kv/{key}`
+- `GET /v1/kv/{key}` (`*` devuelve el snapshot visible)
 - `GET /v1/availability`
 - `GET /v1/conflicts`
 - `GET /v1/sync`
 - `GET /health`
 - `GET /ready`
 
-## Despliegue Docker manual
+Todas las rutas `/v1/*` requieren `Authorization: Bearer <token>`. `/health`
+y `/ready` son las únicas sin autenticación.
+
+## Interfaz web
+
+Con el clúster levantado, en otra terminal:
 
 ```bash
-export SDCAL_AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-export SDCAL_DEMO_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-export SDCAL_API_TOKENS="$(python -c 'import json,os; print(json.dumps({"alice": os.environ["SDCAL_DEMO_TOKEN"]}))')"
+cd ui
+npm install
+npm run dev
+```
+
+Abre `http://localhost:5173`, crea una cuenta y entra. El proxy de Vite envía
+`/v1` y `/health` a `http://localhost:8081`.
+
+Para desarrollo usa `npm run dev`. `npm run preview` no tiene proxy configurado
+para `/v1`, así que las llamadas a la API no llegarían al backend.
+
+## Operación diaria
+
+Ver logs:
+
+```bash
+docker logs -f ray-head
+docker logs -f sdcal-api-1
+```
+
+Parar los contenedores conservando los datos:
+
+```bash
+docker stop sdcal-api-{1..3} ray-worker-{1..5} ray-head
+```
+
+Volver a levantar el clúster:
+
+```bash
+export SDCAL_AUTH_SECRET="<el-mismo-secreto>"
+SDCAL_SKIP_BUILD=1 ./deploy/up.sh
+```
+
+Borrar contenedores, red y volúmenes:
+
+```bash
+./deploy/down.sh
+```
+
+`down.sh` **elimina los datos replicados**. Úsalo solo cuando quieras empezar
+de cero.
+
+## Demo end-to-end
+
+La demo es una comprobación rápida de que el camino completo funciona. Necesita
+el secreto de autenticación y un token estático para `alice`:
+
+```bash
+export SDCAL_AUTH_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export SDCAL_DEMO_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export SDCAL_API_TOKENS="$(python3 -c 'import json,os; print(json.dumps({"alice": os.environ["SDCAL_DEMO_TOKEN"]}))')"
+
 ./deploy/demo.sh
 ```
 
-El procedimiento completo está en
-[`deploy/despliegue-manual.md`](deploy/despliegue-manual.md). La demo levanta
-un head, cinco workers y tres APIs; las escrituras se confirman mediante el
-líder Raft y el mismo `msg_id` reenviado queda deduplicado por la FSM.
+Qué hace exactamente `demo.sh`:
 
-Las lecturas de disponibilidad y conflictos se ejecutan como Ray Tasks sobre
-snapshots inmutables. `/v1/sync` omite los payloads `BUSY_UPDATE`; las páginas
-no copian la proyección completa y el cliente la solicita una sola vez al
-terminar de leerlas. El cursor se conserva por despliegue y usuario.
+1. Comprueba que exista `SDCAL_DEMO_TOKEN`.
+2. Ejecuta `up.sh`, que construye y levanta el clúster completo.
+3. Envía un comando `REQUEST` con un `msg_id` fijo a
+   `http://localhost:8081/v1/commands`, autenticado como `alice`.
+4. Reenvía **el mismo comando y el mismo `msg_id`** a
+   `http://localhost:8082/v1/commands`. La FSM lo deduplica y no crea un
+   segundo evento.
+5. Consulta `/v1/status` desde `http://localhost:8083`.
+6. Al salir, ejecuta `down.sh`, que elimina contenedores, red y volúmenes.
 
-Las reuniones de grupo usan por defecto su hora de inicio como fecha límite
-para la votación. El líder Raft emite evaluaciones internas y marca como
-`EXPIRED` las propuestas que sigan abiertas al vencer esa fecha.
+> `demo.sh` es una prueba temporal. No lo uses si quieres conservar el clúster
+> o los datos.
 
-El head usa GCS RocksDB persistente para recuperarse de reinicios de su
-contenedor. La recuperación de GCS con RocksDB es experimental en Ray; el
-despliegue local no garantiza tolerancia a la pérdida física del host Docker.
+## Problemas frecuentes
+
+- **Puerto ocupado**: comprueba `8081`–`8083`, `6379` y `8265` con
+  `ss -ltnp` o `docker ps`.
+- **`permission denied` al ejecutar Docker**: tu usuario debe pertenecer al
+  grupo `docker` o debes ejecutar con los permisos adecuados.
+- **El primer build falla por red**: las imágenes instalan dependencias desde
+  PyPI. Sin Internet, hay que poblar `deploy/wheelhouse/` antes de construir.
+- **`/ready` devuelve `503`**: todavía no hay líder o quórum. Espera unos
+  segundos y revisa `docker logs ray-head` y los logs de las APIs.
+- **Menos de 5 workers**: la imagen de API usa `--raft-replicas=5` y
+  `--raft-placement=strict`. Un clúster nuevo necesita 5 workers para colocar
+  las 5 réplicas.
+- **El secreto cambió entre APIs**: los tokens dejan de validar. Usa el mismo
+  `SDCAL_AUTH_SECRET` en todas las APIs y consérvalo entre reinicios.
+- **Quedan contenedores de una ejecución anterior**: `up.sh` los elimina y
+  recrea, pero los volúmenes se conservan. Usa `down.sh` si quieres borrarlos.
+- **La UI no llega a la API**: usa `npm run dev`, que aplica el proxy de Vite a
+  `localhost:8081`.
+
+## Referencias
+
+- Procedimiento manual detallado: [`deploy/despliegue-manual.md`](deploy/despliegue-manual.md).
+- Scripts de despliegue, demo y caos: `deploy/`.
+- Interfaz web: `ui/`.
