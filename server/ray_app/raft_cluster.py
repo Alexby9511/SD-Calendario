@@ -143,16 +143,33 @@ class RaftCluster:
             ),
         }
 
-    def call_leader(self, method: str, *args: Any) -> Any:
-        """Call a read-only method on the current leader."""
-        leader_id = self.leader()
-        if leader_id is None:
-            raise NoLeaderError("raft: no leader available")
-        actor = self.actor(leader_id)
-        return ray.get(
-            getattr(actor, method).remote(*args),
-            timeout=self.timeout,
-        )
+    def call_leader(self, method: str, *args: Any, attempts: int = 3) -> Any:
+        """Call a read-only method on the current leader.
+
+        The leader can die between discovery and the call, so a missing actor
+        or a dead actor is retried and finally reported as
+        :class:`NoLeaderError` instead of surfacing as a 500 from the API.
+        """
+        last_error: Optional[Exception] = None
+        for _ in range(attempts):
+            leader_id = self.leader()
+            if leader_id is None:
+                raise NoLeaderError("raft: no leader available")
+            try:
+                actor = self.actor(leader_id)
+            except ValueError as exc:
+                # Named actor lookup raises ValueError when the replica is gone.
+                last_error = exc
+                continue
+            try:
+                return ray.get(
+                    getattr(actor, method).remote(*args),
+                    timeout=self.timeout,
+                )
+            except _RAY_ERRORS as exc:
+                last_error = exc
+                continue
+        raise NoLeaderError("raft: leader unavailable") from last_error
 
     def snapshot(self, include_log: bool = False) -> Dict[str, Any]:
         """Return the state machine snapshot held by the leader."""

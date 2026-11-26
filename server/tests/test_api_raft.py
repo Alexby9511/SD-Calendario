@@ -327,6 +327,19 @@ def test_cluster_sync_reads_one_page_without_snapshot_copy():
     )
 
 
+def test_call_leader_reports_a_dead_actor_as_no_leader():
+    from server.ray_app.raft_cluster import RaftCluster
+
+    cluster = RaftCluster(["n0"])
+    cluster.leader = lambda *args: "n0"
+    cluster.actor = lambda node_id: (_ for _ in ()).throw(
+        ValueError(f"actor {node_id} is gone")
+    )
+
+    with pytest.raises(NoLeaderError):
+        cluster.call_leader("state_snapshot")
+
+
 def test_private_event_details_are_hidden_from_other_users(client):
     api.set_cluster(FakeCluster())
 
