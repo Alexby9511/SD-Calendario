@@ -224,7 +224,9 @@ export SDCAL_API_TOKENS="$(python3 -c 'import json,os; print(json.dumps({"alice"
 
 Qué hace exactamente `demo.sh`:
 
-1. Comprueba que exista `SDCAL_DEMO_TOKEN`.
+1. Comprueba que `SDCAL_AUTH_SECRET` tenga al menos 32 caracteres, que existan
+   `SDCAL_DEMO_TOKEN` y `SDCAL_API_TOKENS`, y que el token de demo sea
+   realmente uno de los tokens de `alice`.
 2. Ejecuta `up.sh`, que construye y levanta el clúster completo.
 3. Envía un comando `REQUEST` con un `msg_id` fijo a
    `http://localhost:8081/v1/commands`, autenticado como `alice`.

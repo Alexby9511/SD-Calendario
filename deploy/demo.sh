@@ -5,8 +5,23 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ -z "${SDCAL_DEMO_TOKEN:-}" ]; then
-  printf 'FALLO: configura SDCAL_AUTH_SECRET, SDCAL_DEMO_TOKEN y SDCAL_API_TOKENS para alice\n' >&2
+if [ -z "${SDCAL_AUTH_SECRET:-}" ] || [ "${#SDCAL_AUTH_SECRET}" -lt 32 ]; then
+  printf 'FALLO: configura SDCAL_AUTH_SECRET con al menos 32 caracteres\n' >&2
+  exit 1
+fi
+
+if [ -z "${SDCAL_DEMO_TOKEN:-}" ] || [ -z "${SDCAL_API_TOKENS:-}" ]; then
+  printf 'FALLO: configura SDCAL_DEMO_TOKEN y SDCAL_API_TOKENS para alice\n' >&2
+  exit 1
+fi
+
+if ! python3 -c '
+import json, os, sys
+value = json.loads(os.environ["SDCAL_API_TOKENS"])["alice"]
+tokens = [value] if isinstance(value, str) else value
+sys.exit(0 if os.environ["SDCAL_DEMO_TOKEN"] in tokens else 1)
+'; then
+  printf 'FALLO: SDCAL_DEMO_TOKEN no es un token de alice en SDCAL_API_TOKENS\n' >&2
   exit 1
 fi
 
