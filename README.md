@@ -252,6 +252,9 @@ Qué hace exactamente `demo.sh`:
   las 5 réplicas.
 - **El secreto cambió entre APIs**: los tokens dejan de validar. Usa el mismo
   `SDCAL_AUTH_SECRET` en todas las APIs y consérvalo entre reinicios.
+- **`429 too_many_auth_attempts`**: registro y login limitan a 30 intentos por
+  minuto y por IP en cada API. Ajusta `SDCAL_AUTH_RATE_LIMIT` y
+  `SDCAL_AUTH_RATE_WINDOW_S` si necesitas otro límite.
 - **Quedan contenedores de una ejecución anterior**: `up.sh` los elimina y
   recrea, pero los volúmenes se conservan. Usa `down.sh` si quieres borrarlos.
 - **La UI no llega a la API**: usa `npm run dev`, que aplica el proxy de Vite a

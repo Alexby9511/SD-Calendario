@@ -7,6 +7,7 @@ from server.ray_app import api
 from server.ray_app.api import app
 from server.ray_app.coordinator import Coordinator
 from server.ray_app.auth import TokenRegistry
+from server.ray_app.ratelimit import SlidingWindowLimiter
 
 
 def command(msg_id):
@@ -224,6 +225,26 @@ def test_availability_hides_users_without_a_share(client):
     assert other.status_code == 200
     assert other.json()["users"] == {}
     assert own.json()["users"] == {"bob": "busy"}
+
+
+def test_auth_endpoints_are_rate_limited_per_client(client, monkeypatch):
+    monkeypatch.setattr(
+        api, "auth_limiter", SlidingWindowLimiter(limit=2, window_seconds=60)
+    )
+    credentials = {"user_id": "alice", "password": "wrong-password"}
+
+    assert client.post("/v1/auth/login", json=credentials).status_code == 401
+    assert client.post("/v1/auth/login", json=credentials).status_code == 401
+    response = client.post("/v1/auth/login", json=credentials)
+
+    assert response.status_code == 429
+    assert response.json()["detail"]["reason"] == "too_many_auth_attempts"
+    assert response.headers["retry-after"] == "60"
+    # Registration has its own bucket, so login throttling does not block it.
+    assert client.post(
+        "/v1/auth/register",
+        json={"user_id": "bob", "password": "secure password"},
+    ).status_code == 201
 
 
 def test_local_availability_timeout_returns_503(client, monkeypatch):

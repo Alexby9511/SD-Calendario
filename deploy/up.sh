@@ -8,6 +8,8 @@
 #   SDCAL_APIS      número de APIs (3)
 #   SDCAL_API_TOKENS JSON de usuario a token Bearer
 #   SDCAL_AUTH_SECRET clave compartida para las sesiones de usuario
+#   SDCAL_AUTH_RATE_LIMIT intentos de registro/login por IP y ventana (30)
+#   SDCAL_AUTH_RATE_WINDOW_S ventana del límite de autenticación en segundos (60)
 #   SDCAL_SKIP_BUILD=1 reutiliza las imágenes ya construidas
 set -euo pipefail
 
@@ -86,6 +88,8 @@ for index in $(seq 1 "$APIS"); do
     --name "sdcal-api-$index" --network "$NETWORK" \
     -e SDCAL_API_TOKENS="${SDCAL_API_TOKENS:-}" \
     -e SDCAL_AUTH_SECRET="$SDCAL_AUTH_SECRET" \
+    -e SDCAL_AUTH_RATE_LIMIT="${SDCAL_AUTH_RATE_LIMIT:-}" \
+    -e SDCAL_AUTH_RATE_WINDOW_S="${SDCAL_AUTH_RATE_WINDOW_S:-}" \
     -p "$port:8080" "$IMAGE-api" >/dev/null
   # El proxy de Ray Client asigna un puerto por conexión; escalonar el
   # arranque evita la carrera entre las tres APIs.

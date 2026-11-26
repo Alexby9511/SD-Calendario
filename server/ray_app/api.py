@@ -1,7 +1,7 @@
 from typing import Any, Dict, Optional
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi import Depends, FastAPI, Header, HTTPException, Request
 except ImportError:
     FastAPI = None
 
@@ -27,11 +27,13 @@ from .auth import (
     verify_password,
 )
 from .raft_cluster import NoLeaderError, RaftCluster
+from .ratelimit import limiter_from_environment
 
 
 local_coordinator = Coordinator()
 coordinator_actor: Optional[Any] = None
 raft_cluster: Optional[RaftCluster] = None
+auth_limiter = limiter_from_environment()
 
 
 def set_cluster(cluster: Optional[RaftCluster]) -> None:
@@ -141,6 +143,17 @@ def _unavailable(exc: Exception) -> HTTPException:
     return HTTPException(status_code=503, detail={"reason": str(exc)})
 
 
+def _enforce_auth_rate_limit(request, route: str) -> None:
+    host = request.client.host if request.client is not None else "unknown"
+    if auth_limiter.allow(f"{route}:{host}"):
+        return
+    raise HTTPException(
+        status_code=429,
+        detail={"reason": "too_many_auth_attempts"},
+        headers={"Retry-After": str(int(auth_limiter.window_seconds))},
+    )
+
+
 app = FastAPI(title="SD Calendario sobre Ray") if FastAPI is not None else None
 
 
@@ -160,7 +173,8 @@ def _account_snapshot() -> Dict[str, Any]:
 
 if app is not None:
     @app.post("/v1/auth/register", status_code=201)
-    def register_account(credentials: Dict[str, Any]):
+    def register_account(credentials: Dict[str, Any], request: Request):
+        _enforce_auth_rate_limit(request, "register")
         try:
             signer = TokenSigner.from_environment()
         except AuthenticationNotConfigured as exc:
@@ -211,7 +225,8 @@ if app is not None:
         }
 
     @app.post("/v1/auth/login")
-    def login(credentials: Dict[str, Any]):
+    def login(credentials: Dict[str, Any], request: Request):
+        _enforce_auth_rate_limit(request, "login")
         try:
             signer = TokenSigner.from_environment()
         except AuthenticationNotConfigured as exc:
@@ -228,9 +243,8 @@ if app is not None:
         except ValueError:
             user_id = ""
         account = _account_snapshot().get(user_id)
-        if account is None or not verify_password(
-            credentials.get("password"), account
-        ):
+        verified = verify_password(credentials.get("password"), account)
+        if account is None or not verified:
             raise HTTPException(
                 status_code=401, detail={"reason": "invalid_credentials"}
             )

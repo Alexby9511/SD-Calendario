@@ -16,6 +16,13 @@ USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,31}$")
 PASSWORD_ITERATIONS = 310_000
 TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
 
+# Used to spend the same PBKDF2 work when the account does not exist, so login
+# timing does not reveal which user IDs are registered.
+_DUMMY_ACCOUNT = {
+    "password_salt": "00" * 16,
+    "password_hash": "00" * 32,
+}
+
 
 class AuthenticationNotConfigured(RuntimeError):
     """Raised when the API has no configured user tokens."""
@@ -101,6 +108,8 @@ def hash_password(password: object) -> Dict[str, str]:
 
 
 def verify_password(password: object, account: Dict[str, str]) -> bool:
+    if account is None:
+        account = _DUMMY_ACCOUNT
     if not isinstance(password, str):
         return False
     try:
