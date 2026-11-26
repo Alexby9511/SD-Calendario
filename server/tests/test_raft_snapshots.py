@@ -316,3 +316,91 @@ def test_snapshot_threshold_compacts_automatically(tmp_path):
         assert storage.load_log() == []
     finally:
         storage.close()
+
+
+class _FailingSnapshotStorage:
+    """Storage whose snapshot write always fails."""
+
+    def load_meta(self):
+        return {}
+
+    def save_meta(self, *args, **kwargs):
+        pass
+
+    def load_log(self):
+        return []
+
+    def save_log(self, *args, **kwargs):
+        pass
+
+    def save_snapshot(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    def load_snapshot(self):
+        return None
+
+
+class _FailingLogClearStorage(_FailingSnapshotStorage):
+    """Storage whose snapshot write succeeds but whose log clear fails."""
+
+    def save_snapshot(self, *args, **kwargs):
+        pass
+
+    def save_log(self, *args, **kwargs):
+        raise OSError("disk full")
+
+
+def test_failed_snapshot_persistence_does_not_restore_the_state_machine():
+    restored = []
+    node = RaftNode(
+        "n0",
+        [],
+        InMemoryNetwork(),
+        clock=FakeClock(),
+        storage=_FailingSnapshotStorage(),
+        snapshot_restorer=restored.append,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        node.handle_install_snapshot(
+            InstallSnapshot(
+                term=1,
+                leader_id="n1",
+                last_included_index=5,
+                last_included_term=1,
+                data=b'{"value":5}',
+            )
+        )
+
+    assert restored == []
+    assert node.log.snapshot_index == 0
+    assert node.commit_index == 0
+    assert node.last_applied == 0
+
+
+def test_failed_log_clear_does_not_restore_the_state_machine():
+    restored = []
+    node = RaftNode(
+        "n0",
+        [],
+        InMemoryNetwork(),
+        clock=FakeClock(),
+        storage=_FailingLogClearStorage(),
+        snapshot_restorer=restored.append,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        node.handle_install_snapshot(
+            InstallSnapshot(
+                term=1,
+                leader_id="n1",
+                last_included_index=5,
+                last_included_term=1,
+                data=b'{"value":5}',
+            )
+        )
+
+    assert restored == []
+    assert node.log.snapshot_index == 0
+    assert node.commit_index == 0
+    assert node.last_applied == 0

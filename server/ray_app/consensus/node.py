@@ -492,12 +492,15 @@ class RaftNode:
         if message.last_included_index <= self.commit_index:
             return InstallSnapshotResponse(self.current_term, True)
 
-        self._restore_snapshot(message.data)
+        # Persist before touching memory: a failed write must not leave the
+        # state machine or the log ahead of what is on disk.
         self._persist_snapshot(
             message.last_included_index,
             message.last_included_term,
             message.data,
         )
+        self._persist_log([], replace=True)
+        self._restore_snapshot(message.data)
         self.log = RaftLog(
             snapshot_index=message.last_included_index,
             snapshot_term=message.last_included_term,
@@ -506,7 +509,6 @@ class RaftNode:
         self.last_applied = message.last_included_index
         self._snapshot_data = message.data
         self._results = {}
-        self._persist_log(replace=True)
         self.logger.info(
             "installed snapshot node_id=%s index=%d term=%d",
             self.node_id,
