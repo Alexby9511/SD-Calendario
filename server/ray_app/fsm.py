@@ -697,10 +697,12 @@ class CalendarFSM:
         include_snapshot: bool = True,
     ) -> Dict[str, Any]:
         page = self.sync(since, limit)
-        if self.log and since < self.log[0]["index"] - 1:
-            # The cursor points before the retained history (a trimmed window
-            # or a snapshot restore). Incremental entries alone cannot rebuild
-            # the client state, so force the snapshot.
+        # The cursor must be inside the retained history. A trimmed window and a
+        # snapshot restore (which leaves the log empty) both break incremental
+        # sync: the client would advance its cursor without ever seeing the
+        # missing state, so force the snapshot instead.
+        window_start = self.log[0]["index"] if self.log else self.applied_index + 1
+        if since < window_start - 1:
             include_snapshot = True
         if not include_snapshot and any(
             item["command"].get("type") == "EVALUATE"

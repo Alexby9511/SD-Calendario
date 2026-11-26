@@ -709,6 +709,32 @@ def test_sync_for_forces_a_snapshot_when_the_cursor_fell_out_of_history(monkeypa
     assert "snapshot" not in page
 
 
+def test_sync_for_forces_a_snapshot_when_history_was_restored_empty():
+    fsm = CalendarFSM()
+    for n in range(3):
+        event = request(
+            msg_id=f"01J0000000000000000000003{n}",
+            uid=f"alice:01J0000000000000000000040{n}",
+        )
+        assert fsm.apply(event)["code"] == 200
+
+    # A snapshot does not carry the sync history, so a replica that restarts
+    # (or installs a leader snapshot) has an applied index but no log.
+    restored = CalendarFSM.from_snapshot(fsm.snapshot())
+    assert restored.log == []
+    assert restored.applied_index == 3
+
+    # A stale cursor cannot be advanced incrementally: the client must receive
+    # the snapshot even when it asked to omit it.
+    page = restored.sync_for("alice", 1, 100, include_snapshot=False)
+    assert "snapshot" in page
+    assert page["snapshot"]["applied_index"] == 3
+
+    # A cursor already at the applied index needs nothing.
+    page = restored.sync_for("alice", 3, 100, include_snapshot=False)
+    assert "snapshot" not in page
+
+
 def test_sync_for_includes_a_snapshot_when_an_evaluation_expires_a_visible_event():
     fsm = CalendarFSM()
     proposal = request()
