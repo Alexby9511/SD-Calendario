@@ -335,6 +335,9 @@ class CalendarFSM:
             envelope.payload
         )
         event["sequence"] = envelope.sequence
+        # The proposed time changed: replies to the previous time no longer
+        # count towards confirmation and must be re-sent for the new one.
+        self.attendance[envelope.uid] = {}
         return {"ok": True, "uid": envelope.uid, "counter": envelope.payload}
 
     def _decline_counter(self, envelope: Envelope) -> Dict[str, Any]:

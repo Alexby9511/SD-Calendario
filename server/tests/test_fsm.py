@@ -224,6 +224,56 @@ def test_majority_confirmation_uses_the_selected_rule():
     assert fsm.events[proposal["uid"]]["state"] == "CONFIRMED"
 
 
+def test_counter_clears_replies_to_the_previous_time():
+    fsm = CalendarFSM()
+    proposal = request()
+    proposal["payload"] = {
+        "kind": "group",
+        "start": "2026-11-21T10:00:00Z",
+        "end": "2026-11-21T11:00:00Z",
+        "participants": ["bob", "carol"],
+        "confirmation_rule": "ALL",
+    }
+    assert fsm.apply(proposal)["code"] == 200
+
+    reply = request(
+        msg_id="01J00000000000000000000071", sender="bob", uid=proposal["uid"]
+    )
+    reply["type"] = "REPLY"
+    reply["payload"] = {"partstat": "ACCEPTED"}
+    assert fsm.apply(reply)["code"] == 200
+    assert fsm.attendance[proposal["uid"]]["bob"] == "ACCEPTED"
+
+    counter = request(
+        msg_id="01J00000000000000000000072",
+        sender="carol",
+        uid=proposal["uid"],
+        sequence=2,
+    )
+    counter["type"] = "COUNTER"
+    counter["payload"] = {
+        "proposed_start": "2026-11-21T12:00:00Z",
+        "proposed_end": "2026-11-21T13:00:00Z",
+    }
+    assert fsm.apply(counter)["code"] == 200
+
+    # The old acceptance does not confirm the new time.
+    assert fsm.attendance[proposal["uid"]] == {}
+    assert fsm.events[proposal["uid"]]["state"] == "PROPOSED"
+
+    stale = request(
+        msg_id="01J00000000000000000000073",
+        sender="bob",
+        uid=proposal["uid"],
+        sequence=1,
+    )
+    stale["type"] = "REPLY"
+    stale["payload"] = {"partstat": "ACCEPTED"}
+    result = fsm.apply(stale)
+    assert result["code"] == 409
+    assert result["result"]["reason"] == "stale_sequence"
+
+
 def test_personal_privacy_controls_freebusy_without_hiding_organizer_conflicts():
     fsm = CalendarFSM()
     event = request()
