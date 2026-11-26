@@ -136,10 +136,13 @@ class RaftNode:
         if index != self.log.snapshot_index or term != self.log.snapshot_term:
             raise ValueError("raft: snapshot and meta disagree")
         self._snapshot_data = data
-        if self._snapshot_restorer is not None:
-            self._snapshot_restorer(data)
-            self.commit_index = index
-            self.last_applied = index
+        if self._snapshot_restorer is None:
+            raise ValueError(
+                "raft: snapshot found but no snapshot restorer is configured"
+            )
+        self._snapshot_restorer(data)
+        self.commit_index = index
+        self.last_applied = index
 
     @property
     def quorum(self) -> int:

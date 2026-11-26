@@ -1,6 +1,8 @@
 import json
 import random
 
+import pytest
+
 from server.ray_app.consensus.clock import FakeClock
 from server.ray_app.consensus.messages import InstallSnapshot, LogEntry, RequestVote
 from server.ray_app.consensus.node import RaftNode, Role
@@ -153,6 +155,23 @@ def test_save_snapshot_drops_compacted_entries(tmp_path):
         assert storage.load_snapshot() == (2, 1, b'{"value":2}')
         assert storage.load_meta()["snapshot_index"] == 2
         assert storage.load_log() == [LogEntry(3, 1, {"msg_id": "m3"})]
+
+
+def test_snapshot_without_restorer_fails_fast(tmp_path):
+    path = tmp_path / "raft.db"
+    storage = SQLiteStorage(path)
+    storage.save_snapshot(1, 1, b'{"value":2}')
+    try:
+        with pytest.raises(ValueError, match="snapshot restorer"):
+            RaftNode(
+                "n0",
+                [],
+                InMemoryNetwork(),
+                clock=FakeClock(),
+                storage=storage,
+            )
+    finally:
+        storage.close()
 
 
 def test_snapshot_survives_restart_and_restores_state(tmp_path):
