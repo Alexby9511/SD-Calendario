@@ -827,10 +827,6 @@ class CalendarFSM:
         if not isinstance(description, str):
             raise ValueError("invalid_event_description")
         payload["description"] = description
-        description = payload.get("description", "")
-        if not isinstance(description, str):
-            raise ValueError("invalid_event_description")
-        payload["description"] = description
         kind = str(
             payload.get(
                 "kind",
