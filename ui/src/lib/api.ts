@@ -8,15 +8,29 @@ export interface AuthSession {
   token_type: "bearer";
 }
 
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return undefined;
+  }
+}
+
 async function authRequest(path: string, user_id: string, password: string): Promise<AuthSession> {
   const response = await fetch(`${API_BASE}/v1/auth/${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ user_id, password })
   });
-  const data = await response.json();
+  const data = await readJson(response) as
+    | {
+        detail?: { reason?: string };
+        access_token?: unknown;
+        user_id?: unknown;
+      }
+    | undefined;
   if (!response.ok) {
-    const reason = data.detail?.reason;
+    const reason = data?.detail?.reason;
     const messages: Record<string, string> = {
       invalid_user_id: "Usa un identificador de 3 a 32 caracteres: letras, números, punto, guion o guion bajo.",
       weak_password: "La contraseña debe tener al menos 8 caracteres.",
@@ -24,9 +38,12 @@ async function authRequest(path: string, user_id: string, password: string): Pro
       invalid_credentials: "Identificador o contraseña incorrectos.",
       authentication_not_configured: "El backend todavía no está configurado para autenticar usuarios."
     };
-    throw new Error(messages[reason] ?? "No se pudo completar la autenticación. Inténtalo de nuevo.");
+    throw new Error(messages[reason ?? ""] ?? `No se pudo completar la autenticación (HTTP ${response.status}).`);
   }
-  return data as AuthSession;
+  if (!data || typeof data.access_token !== "string" || typeof data.user_id !== "string") {
+    throw new Error("El backend devolvió una respuesta inesperada.");
+  }
+  return { user_id: data.user_id, access_token: data.access_token, token_type: "bearer" };
 }
 
 export function register(user_id: string, password: string): Promise<AuthSession> {
@@ -42,7 +59,10 @@ export async function validateSession(token: string): Promise<string> {
     headers: authHeaders(token)
   });
   if (!response.ok) throw new Error("Tu sesión venció. Inicia sesión de nuevo.");
-  const data = await response.json() as { user_id: string };
+  const data = await readJson(response) as { user_id?: unknown } | undefined;
+  if (!data || typeof data.user_id !== "string") {
+    throw new Error("El backend devolvió una respuesta inesperada.");
+  }
   return data.user_id;
 }
 
@@ -57,9 +77,20 @@ export async function applyCommand(command: Envelope, token: string): Promise<Co
     headers: { ...authHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify(command)
   });
-  const data = await response.json();
-  if (!response.ok) return { ...(data.detail ?? data), code: response.status };
-  return data;
+  const data = await readJson(response);
+  if (!response.ok) {
+    if (!data || typeof data !== "object") {
+      // Throwing keeps the outbox item retryable instead of parking it as a
+      // permanent rejection when a proxy returns a non-JSON error page.
+      throw new Error(`El backend devolvió una respuesta no JSON (HTTP ${response.status}).`);
+    }
+    const detail = (data as { detail?: unknown }).detail;
+    return { ...((detail ?? data) as Record<string, unknown>), code: response.status } as CommandResponse;
+  }
+  if (!data || typeof data !== "object") {
+    throw new Error("El backend devolvió una respuesta inesperada.");
+  }
+  return data as CommandResponse;
 }
 
 export async function sync(
