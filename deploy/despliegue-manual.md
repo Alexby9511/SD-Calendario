@@ -16,7 +16,8 @@ bash ./deploy/test-cluster.sh # levanta el despliegue y verifica conexiones Ray/
 ```
 
 Variables: `SDCAL_NETWORK` (red), `SDCAL_IMAGE` (prefijo de imágenes),
-`SDCAL_WORKERS` (5), `SDCAL_APIS` (3) y `SDCAL_SKIP_BUILD=1` para reutilizar las
+`SDCAL_WORKERS` (5; mínimo 5 porque hay una réplica por nodo con placement
+estricto), `SDCAL_APIS` (3; mínimo 1) y `SDCAL_SKIP_BUILD=1` para reutilizar las
 imágenes ya construidas. `SDCAL_AUTH_SECRET` debe ser un secreto compartido de
 al menos 32 caracteres, igual para todas las APIs; consérvalo en un gestor de
 secretos para que las sesiones sigan siendo válidas tras reiniciar. Se puede
@@ -24,12 +25,12 @@ generar con `python -c 'import secrets; print(secrets.token_urlsafe(48))'`.
 `SDCAL_API_TOKENS` queda disponible opcionalmente para clientes heredados. Los
 secretos se inyectan en las APIs y no se guardan en el repositorio.
 
-`test-cluster.sh` vuelve a crear los contenedores de referencia (1 head, 5
-workers y 3 APIs), conserva sus volúmenes y comprueba la red Docker, el registro
-de los nodos Ray, las cinco réplicas Raft en nodos distintos, el líder común y
-el quórum desde las tres APIs. Configura primero `SDCAL_AUTH_SECRET` (y
-`SDCAL_API_TOKENS` si se usarán clientes heredados); para omitir la
-reconstrucción de imágenes ya disponibles:
+`test-cluster.sh` vuelve a crear los contenedores con `SDCAL_WORKERS` y
+`SDCAL_APIS` (por defecto 1 head, 5 workers y 3 APIs), conserva sus volúmenes y
+comprueba la red Docker, el registro de los nodos Ray, las cinco réplicas Raft
+en nodos distintos, el líder común y el quórum desde todas las APIs. Configura
+primero `SDCAL_AUTH_SECRET` (y `SDCAL_API_TOKENS` si se usarán clientes
+heredados); para omitir la reconstrucción de imágenes ya disponibles:
 
 ```bash
 export SDCAL_AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
