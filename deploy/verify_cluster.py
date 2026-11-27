@@ -8,13 +8,29 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-WORKERS = 5
-APIS = 3
 NETWORK = os.environ.get("SDCAL_NETWORK", "sdcal")
+# The API image starts five Raft replicas; extra workers only host Ray tasks.
+REPLICAS = 5
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"FALLO: {message}")
+
+
+def env_count(name: str, default: int) -> int:
+    """Read a positive container count from the environment."""
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        fail(f"{name} debe ser un entero positivo (recibido {raw!r})")
+    if value < 1:
+        fail(f"{name} debe ser un entero positivo (recibido {raw!r})")
+    return value
+
+
+WORKERS = env_count("SDCAL_WORKERS", 5)
+APIS = env_count("SDCAL_APIS", 3)
 
 
 def docker(*args: str) -> str:
@@ -63,13 +79,18 @@ def main() -> None:
     ]:
         if resource not in ray_status:
             fail(f"Ray no registra el recurso {resource}")
-    print("OK: Ray registra el head y los cinco workers")
+    print(f"OK: Ray registra el head y los {WORKERS} workers")
 
     api_environment = next(
-        value
-        for value in containers[WORKERS + 1]["Config"]["Env"]
-        if value.startswith("SDCAL_API_TOKENS=")
+        (
+            value
+            for value in containers[WORKERS + 1]["Config"]["Env"]
+            if value.startswith("SDCAL_API_TOKENS=")
+        ),
+        None,
     )
+    if not api_environment or not api_environment.split("=", 1)[1].strip():
+        fail("la API no tiene SDCAL_API_TOKENS; configura tokens para verificar")
     users_to_tokens = json.loads(api_environment.split("=", 1)[1])
     token = next(
         token
@@ -77,7 +98,7 @@ def main() -> None:
         for token in ([configured] if isinstance(configured, str) else configured)
     )
 
-    expected_replicas = {f"n{index}" for index in range(WORKERS)}
+    expected_replicas = {f"n{index}" for index in range(REPLICAS)}
     leader_ids = set()
     for index in range(1, APIS + 1):
         port = 8080 + index
@@ -89,9 +110,9 @@ def main() -> None:
         replicas = status.get("replicas", {})
         if status.get("middleware") != "ray":
             fail(f"API en puerto {port} no está usando Ray")
-        if status.get("alive_replicas") != WORKERS:
-            fail(f"API en puerto {port} no ve las {WORKERS} réplicas")
-        if status.get("expected_replicas") != WORKERS:
+        if status.get("alive_replicas") != REPLICAS:
+            fail(f"API en puerto {port} no ve las {REPLICAS} réplicas")
+        if status.get("expected_replicas") != REPLICAS:
             fail(f"API en puerto {port} espera un número inesperado de réplicas")
         if not status.get("quorum_available"):
             fail(f"API en puerto {port} no tiene quórum")
@@ -127,17 +148,21 @@ def main() -> None:
         placement_keys = {
             replica.get("placement_key") for replica in replicas.values()
         }
-        if len(ray_node_ids) != WORKERS or None in ray_node_ids:
+        if len(ray_node_ids) != REPLICAS or None in ray_node_ids:
             fail(
                 "Las réplicas no están comunicándose desde nodos Ray distintos "
                 f"(API {port})"
             )
-        expected_placements = {
+        declared_placements = {
             f"resource:sdcal-node-{index}" for index in range(1, WORKERS + 1)
         }
-        if placement_keys != expected_placements:
+        if (
+            len(placement_keys) != REPLICAS
+            or None in placement_keys
+            or not placement_keys <= declared_placements
+        ):
             fail(
-                "Las réplicas no están colocadas en cada worker esperado "
+                "Las réplicas no están colocadas en workers distintos "
                 f"(API {port})"
             )
 
