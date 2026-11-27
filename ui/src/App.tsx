@@ -783,7 +783,12 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
             const last = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
             next.setDate(Math.min(day, last));
             return next;
-          })} />
+          })}
+          onSelectDate={(nextDate) => {
+            setNavDirection(nextDate.getTime() >= date.getTime() ? "next" : "prev");
+            setDate(nextDate);
+            if (view === "Año") setView("Mes");
+          }} />
         <div className={`calendar-transition calendar-${navDirection}`} key={`${view}-${date.toISOString().slice(0, 10)}`}>
           <CalendarGrid view={view} date={date} events={visibleEvents} personalEvents={personalEvents}
             pendingInvitationUids={pendingInvitationUids}

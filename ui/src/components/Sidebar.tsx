@@ -40,6 +40,7 @@ interface Props {
   onShowCancelled: (show: boolean) => void;
   view: "Día" | "Semana" | "Mes" | "Año" | "Agenda";
   onMoveMonth: (direction: -1 | 1) => void;
+  onSelectDate: (date: Date) => void;
   currentUser: string;
   friendUsers: string[];
   shareUsers: string[];
@@ -60,9 +61,6 @@ export function Sidebar(props: Props) {
   const [deleteCalendar, setDeleteCalendar] = useState<CustomCalendar | null>(null);
   const year = props.date.getFullYear();
   const month = props.date.getMonth();
-  const first = new Date(year, month, 1).getDay();
-  const days = new Date(year, month + 1, 0).getDate();
-  const cells = Array.from({ length: 42 }, (_, i) => i - first + 2);
   const invitations = props.events.filter((event) => props.pendingInvitationUids.has(event.uid));
   const today = new Date();
   const active = props.date;
@@ -130,6 +128,7 @@ export function Sidebar(props: Props) {
                   isActive ? "active-date" : "",
                   inActiveWeek ? "active-week" : ""
                 ].filter(Boolean).join(" ")}
+                onClick={() => props.onSelectDate(new Date(cellDate))}
               >
                 {cellDate.getDate()}
               </button>
