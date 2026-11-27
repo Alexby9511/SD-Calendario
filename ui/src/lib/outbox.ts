@@ -12,6 +12,7 @@ export interface OutboxItem {
 
 const OUTBOX_KEY = "sd-calendar-outbox";
 const CURSOR_PREFIX = "sd-calendar-sync-cursor";
+const MAX_SENT_ITEMS = 200;
 
 function cursorKey(deployment: string, user: string): string {
   return `${CURSOR_PREFIX}:${encodeURIComponent(deployment)}:${encodeURIComponent(user)}`;
@@ -49,12 +50,28 @@ export function enqueue(envelope: Envelope) {
 }
 
 export function updateOutbox(msgId: string, patch: Partial<OutboxItem>) {
-  const items = getOutbox().map((item) =>
+  const items = capSentItems(getOutbox().map((item) =>
     item.envelope.msg_id === msgId
       ? { ...item, ...patch, updatedAt: new Date().toISOString() }
       : item
-  );
+  ));
   localStorage.setItem(OUTBOX_KEY, JSON.stringify(items));
+}
+
+function capSentItems(items: OutboxItem[]): OutboxItem[] {
+  const sent = items.filter((item) => item.state === "SENT");
+  if (sent.length <= MAX_SENT_ITEMS) return items;
+  const keep = new Set(
+    [...sent]
+      .sort((left, right) =>
+        String(left.updatedAt ?? "").localeCompare(String(right.updatedAt ?? ""))
+      )
+      .slice(-MAX_SENT_ITEMS)
+      .map((item) => item.envelope.msg_id)
+  );
+  return items.filter(
+    (item) => item.state !== "SENT" || keep.has(item.envelope.msg_id)
+  );
 }
 
 export function getCursor(deployment: string, user: string): number {
