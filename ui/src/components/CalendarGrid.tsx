@@ -169,6 +169,24 @@ function formatTime(date: Date) {
   return `${normalized}:${String(date.getMinutes()).padStart(2, "0")} ${hoursValue < 12 ? "AM" : "PM"}`;
 }
 
+function localDateKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function eventLocalDateKey(value?: string) {
+  if (!value) return "";
+  const date = new Date(value.replace(" ", "T"));
+  return Number.isNaN(date.getTime()) ? "" : localDateKey(date);
+}
+
+function formatAgendaStart(value?: string) {
+  if (!value) return "Sin fecha";
+  const date = new Date(value.replace(" ", "T"));
+  return Number.isNaN(date.getTime())
+    ? "Fecha no válida"
+    : `${localDateKey(date)} ${formatTime(date)}`;
+}
+
 function dateTimeAt(day: Date, minutes: number) {
   const date = new Date(day);
   date.setHours(0, minutes, 0, 0);
@@ -363,7 +381,7 @@ export function CalendarGrid(props: Props) {
               className={`agenda-item state-${event.state.toLowerCase()}${isPendingInvitation ? " pending-invitation" : ""}${visuals.sharedColor ? " shared-calendar-event" : ""}${visuals.layer ? " layer-calendar-event" : ""}`}
               style={visuals.style}
             >
-              <time>{event.payload.start?.replace("T", " ").slice(0, 16)}</time>
+              <time>{formatAgendaStart(event.payload.start)}</time>
               <div>
                 <EventIndicators event={event} layer={visuals.layer} />
                 <strong>{event.payload.title ?? "Evento"}</strong>
@@ -450,7 +468,7 @@ export function CalendarGrid(props: Props) {
               day.toDateString() === new Date().toDateString() ? "today" :
               day.toDateString() === props.date.toDateString() ? "active-date" : ""
             }>{day.getDate()}</span>
-            {visibleEvents.filter((event) => event.payload.start?.slice(0, 10) === `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`).map((event) => {
+            {visibleEvents.filter((event) => eventLocalDateKey(event.payload.start) === localDateKey(day)).map((event) => {
               const isPendingInvitation = props.pendingInvitationUids.has(event.uid);
               const visuals = eventVisuals(
                 event,
