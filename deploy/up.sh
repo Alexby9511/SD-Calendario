@@ -19,6 +19,27 @@ IMAGE="${SDCAL_IMAGE:-sdcal-ray:local}"
 WORKERS="${SDCAL_WORKERS:-5}"
 APIS="${SDCAL_APIS:-3}"
 
+case "$WORKERS" in
+  ''|*[!0-9]*)
+    printf 'FALLO: SDCAL_WORKERS debe ser un entero positivo\n' >&2
+    exit 1
+    ;;
+esac
+case "$APIS" in
+  ''|*[!0-9]*)
+    printf 'FALLO: SDCAL_APIS debe ser un entero positivo\n' >&2
+    exit 1
+    ;;
+esac
+if [ "$WORKERS" -lt 5 ]; then
+  printf 'FALLO: SDCAL_WORKERS debe ser al menos 5 (5 réplicas Raft con placement estricto)\n' >&2
+  exit 1
+fi
+if [ "$APIS" -lt 1 ]; then
+  printf 'FALLO: SDCAL_APIS debe ser al menos 1\n' >&2
+  exit 1
+fi
+
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 UP_SUCCEEDED=0
