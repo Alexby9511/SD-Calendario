@@ -712,7 +712,8 @@ function CalendarApp({ user, token, onLogout }: CalendarAppProps) {
     currentDetailEvent.organizer === user
     || calendarShares.some((share) =>
       share.owner === currentDetailEvent.organizer
-      && share.calendar === currentDetailEvent.kind
+      && (share.calendar === currentDetailEvent.kind
+        || share.calendar === currentDetailEvent.payload.calendar_id)
       && share.permission === "edit"
       && share.users.includes(user)
     )
